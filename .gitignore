@@ -1,0 +1,45 @@
+# =========================
+# Python cache
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+
+# =========================
+# Virtual Environment
+# =========================
+.venv/
+venv/
+env/
+
+# =========================
+# Environment / Secret
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# PyCharm
+# =========================
+.idea/
+
+# =========================
+# Face Recognition Runtime Cache
+# =========================
+.face_embeddings_cache.pkl
+face_recognition_result.json
+.recognition_result.json
+*.tmp
+
+# =========================
+# Streamlit Secrets
+# =========================
+.streamlit/secrets.toml
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
