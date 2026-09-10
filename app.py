@@ -8,18 +8,21 @@ from __future__ import annotations
 #
 # STARTUP STRATEGY
 # ----------------
-# 1. Configure TensorFlow/OpenMP BEFORE TensorFlow/DeepFace is imported.
+# 1. Configure TensorFlow/OpenMP before TensorFlow/DeepFace is imported.
 # 2. Import lightweight media/WebRTC runtime once.
-# 3. Import the process-level face_recognizer singleton.
-# 4. Import dashboard once so its lightweight recognition worker exists before START.
-# 5. Start the COMPLETE face-model preload in one background worker:
-#       DeepFace -> SFace -> embedding cache/gallery -> YuNet -> SFace warm-up
+# 3. Acquire the process-level face_recognizer singleton.
+# 4. Import dashboard once so its lightweight recognition worker exists.
+# 5. Start the complete face-model preload in one background worker:
+#       DeepFace -> SFace -> embedding cache/gallery -> YuNet
 #    Nothing is waited on from the Streamlit request thread.
-# 6. Dashboard mounts WebRTC immediately when Dashboard starts.
-#    Before START, frames are passed through untouched without AI processing.
-# 7. START reveals the already-prewarmed webcam immediately.
-# 8. YuNet/SFace recognition uses the already-resident process singleton.
-# 9. START/STOP never recreate the heavy models.
+# 6. When Dashboard renders, dashboard.py mounts the WebRTC component first
+#    in DOM order so browser camera negotiation can begin immediately.
+#    CSS keeps the original visual order: Location above Camera.
+# 7. Before START, WebRTC frames are returned untouched:
+#       no ndarray conversion, no YuNet detection, no bounding box,
+#       no SFace recognition.
+# 8. START reveals the same prewarmed WebRTC stream and enables AI processing.
+# 9. START/STOP never recreate the process-level face models.
 # ==========================================================
 
 import os
@@ -43,7 +46,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
 # ==========================================================
 # SESSION
 # ==========================================================
@@ -61,7 +63,7 @@ if "user_data" not in st.session_state:
 
 @st.cache_resource(show_spinner=False)
 def _bootstrap_process_once():
-    """Initialize process-level runtime and start the complete preload once."""
+    """Initialize process-level runtime and start complete ML preload once."""
 
     import time
 
@@ -106,8 +108,6 @@ def _bootstrap_process_once():
     # ------------------------------------------------------
     # START COMPLETE FACE PRELOAD - NON BLOCKING
     # ------------------------------------------------------
-    # The process-level worker loads the full resident AI stack.
-    # The webcam itself is prewarmed separately by dashboard.py.
 
     start_process_preload()
 
@@ -118,13 +118,13 @@ def _bootstrap_process_once():
         f"{elapsed:.3f}s"
     )
     print(
-        "   DeepFace -> SFace -> embedding cache/gallery -> YuNet -> warm-up"
+        "   DeepFace -> SFace -> embedding cache/gallery -> YuNet"
     )
     print(
-        "   Camera WebRTC prewarm starts separately as soon as Dashboard is rendered."
+        "   WebRTC camera prewarm starts as soon as Dashboard is rendered."
     )
     print(
-        "   Login is rendered immediately; preload continues in background."
+        "   Login is rendered immediately; ML preload continues in background."
     )
 
     return {
@@ -157,10 +157,7 @@ except Exception as exc:
 # ==========================================================
 
 if not st.session_state.get("logged_in", False):
-    # Login is intentionally available immediately. The process-level
-    # SFace preload continues in the background.
     login.main()
 else:
-    # Dashboard mounts the persistent WebRTC prewarm component immediately.
     import dashboard
     dashboard.main()

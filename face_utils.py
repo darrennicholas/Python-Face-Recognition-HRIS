@@ -3194,4 +3194,3 @@ def start_process_preload() -> None:
 def wait_for_process_preload(timeout: float | None = None) -> bool:
     """Block until the process-level face-recognition stack is fully ready."""
     return get_face_recognizer().wait_until_ready(timeout=timeout)
-

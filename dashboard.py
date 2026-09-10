@@ -1082,8 +1082,9 @@ def go_dashboard():
 def go_camera():
     """Open the camera page without loading ML synchronously.
 
-    The page is rendered immediately. The actual webcam request is started
-    by the custom START button so its modal can appear before WebRTC begins.
+    The Dashboard mounts the persistent WebRTC component immediately and
+    keeps it prewarmed in the background. START only reveals the same stream
+    and enables the AI processing path.
     """
     current = st.session_state.get("show_camera", False)
 
@@ -3387,7 +3388,7 @@ def apply_dashboard_css():
 # ==========================================================
 
 def show_dashboard():
-    """Dashboard with live user location and attendance-location marker.
+    """Dashboard with original visual order and early WebRTC prewarm.
 
     The old attendance summary and lower information/status panels are intentionally
     removed from the dashboard. Live GPS remains client-side, while the selected
@@ -3417,6 +3418,11 @@ def show_dashboard():
         """
     )
 
+    # ==========================================================
+    # ORIGINAL VISUAL ORDER
+    # ==========================================================
+    # Live Location Tracking stays first. Live Camera Detection
+    # stays directly below the location/map section.
     render_html(
         """
         <div class="section-heading location-section-heading">
@@ -3431,1628 +3437,1628 @@ def show_dashboard():
     # Keep the complete map UI inside a trusted iframe.
     # Leaflet + geolocation run entirely in the browser.
     map_html = r"""
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <!DOCTYPE html>
+            <html lang="id">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <link
-        rel="stylesheet"
-        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        crossorigin=""
-    >
-
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-
-        html,
-        body {
-            margin: 0;
-            padding: 0;
-            background: transparent;
-            font-family: Arial, sans-serif;
-        }
-
-        body {
-            overflow: auto;
-        }
-
-        .location-card {
-            width: 100%;
-            background: #ffffff;
-            border: 1px solid #d4e8d9;
-            border-radius: 16px;
-            box-shadow: 0 4px 14px rgba(38,112,55,.05);
-            overflow: hidden;
-        }
-
-        /* Desktop only: allow the custom dropdown to extend below
-           the location card instead of being clipped by it. */
-        @media (min-width: 701px) {
-            .location-card {
-                overflow: visible;
-            }
-
-            .attendance-dropdown {
-                z-index: 9999;
-            }
-
-            .attendance-dropdown-menu {
-                z-index: 99999;
-                max-height: 360px;
-            }
-        }
-
-        .location-top {
-            min-height: 70px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            padding: 16px 22px;
-        }
-
-        .location-title {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            color: #194c2c;
-            font-size: 20px;
-            font-weight: 750;
-        }
-
-        .location-target {
-            width: 34px;
-            height: 34px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 10px;
-            background: #e3f5e7;
-            color: #28733e;
-            font-size: 18px;
-            flex: 0 0 34px;
-        }
-
-        .live-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            border: 1px solid #cce5d2;
-            border-radius: 999px;
-            padding: 6px 11px;
-            color: #2b7c41;
-            background: #effaf1;
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: .5px;
-        }
-
-        .live-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: #45ad50;
-            box-shadow: 0 0 0 4px #daf2de;
-        }
-
-        #map {
-            width: 100%;
-            height: 365px;
-            background: #edf4ef;
-        }
-
-        .location-form {
-            padding: 16px 22px 20px;
-            background: #ffffff;
-        }
-
-        .location-label {
-            display: block;
-            margin-bottom: 8px;
-            color: #1f5130;
-            font-size: 15px;
-            font-weight: 750;
-        }
-
-        /* ------------------------------------------------------
-           RESPONSIVE CUSTOM ATTENDANCE LOCATION DROPDOWN
-           The native <select> is kept hidden only as a compatibility
-           value holder. The visible control is fully HTML/CSS/JS
-           and therefore stays inside the iframe/card on mobile.
-           ------------------------------------------------------ */
-
-        .attendance-dropdown {
-            position: relative;
-            width: 100%;
-            z-index: 1000;
-        }
-
-        .attendance-select-hidden {
-            position: absolute !important;
-            width: 1px !important;
-            height: 1px !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
-            overflow: hidden !important;
-        }
-
-        .attendance-dropdown-trigger {
-            width: 100%;
-            min-height: 46px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-            border: 1px solid #dbe7ed;
-            border-radius: 9px;
-            padding: 0 13px 0 14px;
-            background: #f6f9fb;
-            color: #6f7c86;
-            font-size: 15px;
-            font-family: Arial, sans-serif;
-            text-align: left;
-            cursor: pointer;
-            outline: none;
-            box-shadow: none;
-            touch-action: manipulation;
-        }
-
-        .attendance-dropdown-trigger:hover {
-            border-color: #b9d9c0;
-            background: #f8fbf9;
-        }
-
-        .attendance-dropdown.open .attendance-dropdown-trigger,
-        .attendance-dropdown-trigger:focus-visible {
-            border-color: #8bc997;
-            box-shadow: 0 0 0 3px rgba(69,173,80,.10);
-        }
-
-        .attendance-dropdown-value {
-            flex: 1 1 auto;
-            min-width: 0;
-            overflow: hidden;
-            white-space: nowrap;
-            text-overflow: ellipsis;
-        }
-
-        .attendance-dropdown-arrow {
-            flex: 0 0 auto;
-            font-size: 14px;
-            color: #6b7c72;
-            transition: transform .16s ease;
-        }
-
-        .attendance-dropdown.open .attendance-dropdown-arrow {
-            transform: rotate(180deg);
-        }
-
-        .attendance-dropdown-menu {
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: calc(100% + 6px);
-            width: 100%;
-            max-height: min(250px, 42vh);
-            overflow-y: auto;
-            -webkit-overflow-scrolling: touch;
-            overscroll-behavior: contain;
-            padding: 5px;
-            border: 1px solid #d9e7dd;
-            border-radius: 10px;
-            background: #ffffff;
-            box-shadow: 0 10px 28px rgba(27,68,38,.16);
-            display: none;
-            z-index: 5000;
-        }
-
-        .attendance-dropdown.open .attendance-dropdown-menu {
-            display: block;
-        }
-
-        .attendance-dropdown-option {
-            width: 100%;
-            min-height: 42px;
-            display: flex;
-            align-items: center;
-            padding: 9px 11px;
-            border: 0;
-            border-radius: 8px;
-            background: transparent;
-            color: #25313a;
-            font-size: 14px;
-            line-height: 1.3;
-            text-align: left;
-            cursor: pointer;
-        }
-
-        .attendance-dropdown-option:hover,
-        .attendance-dropdown-option:focus-visible {
-            background: #edf8ef;
-            color: #236f37;
-            outline: none;
-        }
-
-        .attendance-dropdown-option.selected {
-            background: #e5f4e8;
-            color: #236f37;
-            font-weight: 700;
-        }
-
-        @media (max-width: 480px) {
-            .attendance-dropdown-trigger {
-                min-height: 48px;
-                height: 48px;
-                border-radius: 10px;
-                padding: 0 12px;
-                font-size: 16px;
-            }
-
-            .attendance-dropdown-menu {
-                top: calc(100% + 5px);
-                max-height: min(245px, 45vh);
-                padding: 4px;
-                border-radius: 10px;
-            }
-
-            .attendance-dropdown-option {
-                min-height: 44px;
-                padding: 10px 11px;
-                font-size: 16px;
-            }
-        }
-
-        @media (orientation: landscape) and (max-width: 900px) {
-            .attendance-dropdown-menu {
-                max-height: min(220px, 60vh);
-            }
-        }
-
-        .geofence-note {
-            margin-top: 10px;
-            padding: 9px 11px;
-            border-radius: 9px;
-            background: #fff7f7;
-            border: 1px solid #fee2e2;
-            color: #7f1d1d;
-            font-size: 12px;
-            line-height: 1.5;
-        }
-
-        .leaflet-popup-content {
-            margin: 11px 14px;
-            font-family: Arial, sans-serif;
-        }
-
-        @media(max-width:700px) {
-            #map {
-                height: 320px;
-            }
-
-            .location-top,
-            .location-form {
-                padding-left: 16px;
-                padding-right: 16px;
-            }
-
-            .location-title {
-                font-size: 17px;
-            }
-        }
-        @media(max-width:480px) {
-            .location-card {
-                border-radius: 13px;
-            }
-
-            .location-top {
-                min-height: 64px;
-                padding: 13px 14px;
-                flex-wrap: wrap;
-                row-gap: 9px;
-            }
-
-            .location-title {
-                font-size: 16px;
-                gap: 8px;
-                min-width: 0;
-            }
-
-            .location-target {
-                width: 32px;
-                height: 32px;
-                flex: 0 0 32px;
-            }
-
-            .live-badge {
-                font-size: 10px;
-                padding: 5px 9px;
-            }
-
-            #map {
-                height: clamp(260px, 70vw, 320px);
-            }
-
-            .location-form {
-                padding: 14px;
-            }
-
-            .location-label {
-                font-size: 14px;
-                margin-bottom: 7px;
-            }
-
-            #attendanceLocation {
-                height: 48px;
-                min-height: 48px;
-                padding: 0 38px 0 12px;
-                font-size: 16px;
-                border-radius: 10px;
-            }
-
-            #attendanceLocation option {
-                font-size: 16px;
-            }
-
-            .geofence-note {
-                font-size: 11px;
-                padding: 8px 10px;
-            }
-
-            .leaflet-popup-content {
-                max-width: calc(100vw - 80px);
-                margin: 9px 10px;
-                font-size: 12px;
-            }
-        }
-
-        @media (orientation: landscape) and (max-width: 900px) {
-            #map {
-                height: clamp(240px, 58vh, 340px);
-            }
-        }
-    </style>
-</head>
-
-<body>
-    <div class="location-card">
-
-        <div class="location-top">
-            <div class="location-title">
-                <span class="location-target">⌖</span>
-                <span>Lokasi Perangkat</span>
-            </div>
-
-            <div class="live-badge">
-                <span class="live-dot"></span>
-                LIVE
-            </div>
-        </div>
-
-        <div id="map"></div>
-
-        <div class="location-form">
-
-            <label class="location-label" for="attendanceLocation">
-                Pilih Lokasi Absen
-            </label>
-
-            <!-- Hidden native select kept only as the existing value/event bridge. -->
-            <select id="attendanceLocation" class="attendance-select-hidden" aria-hidden="true" tabindex="-1">
-                <option value="">-- Pilih lokasi absen --</option>
-
-                <option value="Klinik Utama Medialys">Klinik Utama Medialys</option>
-                <option value="Mandiri DM 12">Mandiri DM 12</option>
-                <option value="Medika DM 9">Medika DM 9</option>
-                <option value="ISS DM 15">ISS DM 15</option>
-                <option value="Klinik Medilab Pekalongan">Klinik Medilab Pekalongan</option>
-                <option value="Treasury Office Tower">Treasury Office Tower</option>
-                <option value="IMS">IMS</option>
-                <option value="Sonic Service Center">Sonic Service Center</option>
-                <option value="Kamal">Kamal</option>
-                <option value="Logistik Medika DM 11">Logistik Medika DM 11</option>
-                <option value="ITS Green Lake">ITS Green Lake</option>
-                <option value="Pabrik Cikande">Pabrik Cikande</option>
-            </select>
-
-            <div class="attendance-dropdown" id="attendanceDropdown">
-                <button
-                    type="button"
-                    class="attendance-dropdown-trigger"
-                    id="attendanceDropdownTrigger"
-                    aria-haspopup="listbox"
-                    aria-expanded="false"
+                <link
+                    rel="stylesheet"
+                    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+                    crossorigin=""
                 >
-                    <span class="attendance-dropdown-value" id="attendanceDropdownValue">
-                        -- Pilih lokasi absen --
-                    </span>
-                    <span class="attendance-dropdown-arrow" aria-hidden="true">⌄</span>
-                </button>
 
-                <div
-                    class="attendance-dropdown-menu"
-                    id="attendanceDropdownMenu"
-                    role="listbox"
-                    aria-label="Daftar lokasi absen"
-                >
-                    <button type="button" class="attendance-dropdown-option" data-value="">
-                        -- Pilih lokasi absen --
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Klinik Utama Medialys">
-                        Klinik Utama Medialys
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Mandiri DM 12">
-                        Mandiri DM 12
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Medika DM 9">
-                        Medika DM 9
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="ISS DM 15">
-                        ISS DM 15
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Klinik Medilab Pekalongan">
-                        Klinik Medilab Pekalongan
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Treasury Office Tower">
-                        Treasury Office Tower
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="IMS">
-                        IMS
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Sonic Service Center">
-                        Sonic Service Center
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Kamal">
-                        Kamal
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Logistik Medika DM 11">
-                        Logistik Medika DM 11
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="ITS Green Lake">
-                        ITS Green Lake
-                    </button>
-                    <button type="button" class="attendance-dropdown-option" data-value="Pabrik Cikande">
-                        Pabrik Cikande
-                    </button>
-                </div>
-            </div>
+                <style>
+                    * {
+                        box-sizing: border-box;
+                    }
 
-            <div
-                id="geofenceStatus"
-                style="
-                    margin-top:12px;
-                    font-size:14px;
-                    font-weight:600;
-                    color:#64748b;
-                "
-            >
-                🔵 Pilih lokasi absensi
-            </div>
+                    html,
+                    body {
+                        margin: 0;
+                        padding: 0;
+                        background: transparent;
+                        font-family: Arial, sans-serif;
+                    }
 
-            <div
-                id="geofenceDistance"
-                style="
-                    margin-top:4px;
-                    font-size:13px;
-                    color:#64748b;
-                "
-            >
-                Radius zona absensi: 60 meter
-            </div>
+                    body {
+                        overflow: auto;
+                    }
 
-            <div class="geofence-note">
-                🔴 Lingkaran merah = zona absensi dengan radius tepat
-                <b>60 meter</b> dari lokasi yang dipilih.
-            </div>
+                    .location-card {
+                        width: 100%;
+                        background: #ffffff;
+                        border: 1px solid #d4e8d9;
+                        border-radius: 16px;
+                        box-shadow: 0 4px 14px rgba(38,112,55,.05);
+                        overflow: hidden;
+                    }
 
-            <div style="margin-top:10px;">
-                <a
-                    id="googleMapsLocationLink"
-                    href="#"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style="
-                        display:inline-block;
-                        padding:7px 10px;
-                        border-radius:8px;
-                        background:#f1f5f9;
-                        color:#334155;
-                        font-size:12px;
-                        text-decoration:none;
-                        border:1px solid #dbe4ea;
-                    "
-                >
-                    📍 Buka lokasi di Google Maps
-                </a>
-            </div>
+                    /* Desktop only: allow the custom dropdown to extend below
+                       the location card instead of being clipped by it. */
+                    @media (min-width: 701px) {
+                        .location-card {
+                            overflow: visible;
+                        }
 
-        </div>
-    </div>
+                        .attendance-dropdown {
+                            z-index: 9999;
+                        }
 
-    <!-- Leaflet JS -->
-    <script
-        src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-        crossorigin=""
-    ></script>
-
-    <script>
-        // ==========================================================
-        // MAP CONFIGURATION
-        // ==========================================================
-
-        const GEOFENCE_RADIUS_METERS = 7000;
-
-        /*
-         * IMPORTANT:
-         * Both locations below have FIXED coordinates.
-         * No geocoding API is required.
-         */
-
-        const ATTENDANCE_LOCATIONS = {
-            "Klinik Utama Medialys": {
-                lat: -6.174145501357489,
-                lng: 106.85686667301668,
-                address:
-                    "504D, Jl. Letjen Suprapto No. 504C, " +
-                    "Cemp. Putih Bar., Kec. Johar Baru, Jakarta 10530"
-            },
-
-            "Mandiri DM 12": {
-                lat: -6.152604321020155,
-                lng: 106.6940247365544,
-                address: "Mandiri DM 12"
-            },
-
-            "Medika DM 9": {
-                lat: -6.153692357716074,
-                lng: 106.69404619422662,
-                address: "Medika DM 9"
-            },
-
-            "ISS DM 15": {
-                lat: -6.151194,
-                lng: 106.695256,
-                address: "ISS DM 15"
-            }
-        };
-
-        const DEFAULT_CENTER = [
-            -6.174145501357489,
-            106.85686667301668
-        ];
-
-        // ==========================================================
-        // MAP CREATION
-        // ==========================================================
-
-        let map = null;
-        let userMarker = null;
-        let userWatchId = null;
-
-        let attendanceMarker = null;
-        let attendanceCircle = null;
-        let selectedAttendancePoint = null;
-        let userCentered = false;
-
-        function initMap() {
-
-            if (typeof L === "undefined") {
-                console.error(
-                    "Leaflet failed to load from CDN."
-                );
-
-                const mapElement =
-                    document.getElementById("map");
-
-                if (mapElement) {
-                    mapElement.innerHTML =
-                        "<div style='" +
-                        "padding:30px;" +
-                        "text-align:center;" +
-                        "color:#b91c1c;" +
-                        "font-family:Arial,sans-serif;" +
-                        "'>" +
-                        "<b>Map gagal dimuat.</b><br>" +
-                        "Periksa koneksi internet / akses CDN Leaflet." +
-                        "</div>";
-                }
-
-                return false;
-            }
-
-            map = L.map(
-                "map",
-                {
-                    zoomControl: true,
-                    attributionControl: true,
-                    preferCanvas: true
-                }
-            ).setView(
-                DEFAULT_CENTER,
-                17
-            );
-
-            L.tileLayer(
-                "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                {
-                    maxZoom: 19,
-                    detectRetina: true,
-                    attribution:
-                        "&copy; OpenStreetMap contributors"
-                }
-            ).addTo(map);
-
-            setTimeout(
-                function () {
-                    map.invalidateSize(true);
-                },
-                250
-            );
-
-            setTimeout(
-                function () {
-                    map.invalidateSize(true);
-                },
-                800
-            );
-
-            return true;
-        }
-
-        // ==========================================================
-        // USER ICON
-        // ==========================================================
-
-        function userIcon() {
-
-            return L.icon({
-                iconUrl:
-                    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-
-                iconRetinaUrl:
-                    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-
-                shadowUrl:
-                    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-
-                iconSize: [25, 41],
-                iconAnchor: [12, 41],
-                popupAnchor: [1, -34],
-                shadowSize: [41, 41]
-            });
-        }
-
-        // ==========================================================
-        // HAVERSINE DISTANCE
-        // ==========================================================
-
-        function calculateDistanceMeters(
-            lat1,
-            lon1,
-            lat2,
-            lon2
-        ) {
-
-            const R = 6371000;
-
-            const dLat =
-                (lat2 - lat1) *
-                Math.PI / 180;
-
-            const dLon =
-                (lon2 - lon1) *
-                Math.PI / 180;
-
-            const a =
-                Math.sin(dLat / 2) *
-                Math.sin(dLat / 2) +
-
-                Math.cos(
-                    lat1 * Math.PI / 180
-                ) *
-
-                Math.cos(
-                    lat2 * Math.PI / 180
-                ) *
-
-                Math.sin(dLon / 2) *
-                Math.sin(dLon / 2);
-
-            const c =
-                2 *
-                Math.atan2(
-                    Math.sqrt(a),
-                    Math.sqrt(1 - a)
-                );
-
-            return R * c;
-        }
-
-        // ==========================================================
-        // GEOFENCE STATUS
-        // ==========================================================
-
-        // ==========================================================
-        // CAMERA START GATE
-        // ==========================================================
-        // The map remains inside the original iframe. Because this iframe is
-        // same-origin with the Streamlit app, it can update the existing
-        // Streamlit START button directly without replacing the map UI.
-        let geofenceAllowsCamera = false;
-
-        function setCameraStartAccess(allowed) {
-
-            geofenceAllowsCamera = Boolean(allowed);
-
-            try {
-                const parentDocument = window.parent.document;
-                const buttons = parentDocument.querySelectorAll("button");
-
-                buttons.forEach(function(button) {
-                    const text = (button.innerText || "").trim();
-
-                    if (text === "START") {
-                        button.disabled = !geofenceAllowsCamera;
-                        button.setAttribute(
-                            "aria-disabled",
-                            geofenceAllowsCamera ? "false" : "true"
-                        );
-
-                        if (geofenceAllowsCamera) {
-                            button.title = "Webcam dapat dimulai di dalam zona absensi.";
-                        } else {
-                            button.title = "START terkunci. Anda harus berada di dalam zona merah.";
+                        .attendance-dropdown-menu {
+                            z-index: 99999;
+                            max-height: 360px;
                         }
                     }
-                });
-            } catch (error) {
-                console.warn("Unable to update camera START button:", error);
-            }
-        }
 
-        function updateGeofenceStatus(
-            distance
-        ) {
+                    .location-top {
+                        min-height: 70px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        gap: 12px;
+                        padding: 16px 22px;
+                    }
 
-            const statusElement =
-                document.getElementById(
-                    "geofenceStatus"
-                );
+                    .location-title {
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        color: #194c2c;
+                        font-size: 20px;
+                        font-weight: 750;
+                    }
 
-            const distanceElement =
-                document.getElementById(
-                    "geofenceDistance"
-                );
+                    .location-target {
+                        width: 34px;
+                        height: 34px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        border-radius: 10px;
+                        background: #e3f5e7;
+                        color: #28733e;
+                        font-size: 18px;
+                        flex: 0 0 34px;
+                    }
 
-            if (
-                !statusElement ||
-                !distanceElement
-            ) {
-                return;
-            }
+                    .live-badge {
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 6px;
+                        border: 1px solid #cce5d2;
+                        border-radius: 999px;
+                        padding: 6px 11px;
+                        color: #2b7c41;
+                        background: #effaf1;
+                        font-size: 11px;
+                        font-weight: 800;
+                        letter-spacing: .5px;
+                    }
 
-            const roundedDistance =
-                Math.round(distance);
+                    .live-dot {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 50%;
+                        background: #45ad50;
+                        box-shadow: 0 0 0 4px #daf2de;
+                    }
 
-            distanceElement.textContent =
-                "Jarak dari lokasi absen: " +
-                roundedDistance +
-                " meter";
+                    #map {
+                        width: 100%;
+                        height: 365px;
+                        background: #edf4ef;
+                    }
 
-            const allowed =
-                distance <=
-                GEOFENCE_RADIUS_METERS;
+                    .location-form {
+                        padding: 16px 22px 20px;
+                        background: #ffffff;
+                    }
 
-            setCameraStartAccess(allowed);
+                    .location-label {
+                        display: block;
+                        margin-bottom: 8px;
+                        color: #1f5130;
+                        font-size: 15px;
+                        font-weight: 750;
+                    }
 
-            if (allowed) {
+                    /* ------------------------------------------------------
+                       RESPONSIVE CUSTOM ATTENDANCE LOCATION DROPDOWN
+                       The native <select> is kept hidden only as a compatibility
+                       value holder. The visible control is fully HTML/CSS/JS
+                       and therefore stays inside the iframe/card on mobile.
+                       ------------------------------------------------------ */
 
-                statusElement.innerHTML =
-                    "🟢 <b>Dalam zona absensi</b>";
+                    .attendance-dropdown {
+                        position: relative;
+                        width: 100%;
+                        z-index: 1000;
+                    }
 
-                statusElement.style.color =
-                    "#15803d";
+                    .attendance-select-hidden {
+                        position: absolute !important;
+                        width: 1px !important;
+                        height: 1px !important;
+                        opacity: 0 !important;
+                        pointer-events: none !important;
+                        overflow: hidden !important;
+                    }
 
-            } else {
+                    .attendance-dropdown-trigger {
+                        width: 100%;
+                        min-height: 46px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        gap: 10px;
+                        border: 1px solid #dbe7ed;
+                        border-radius: 9px;
+                        padding: 0 13px 0 14px;
+                        background: #f6f9fb;
+                        color: #6f7c86;
+                        font-size: 15px;
+                        font-family: Arial, sans-serif;
+                        text-align: left;
+                        cursor: pointer;
+                        outline: none;
+                        box-shadow: none;
+                        touch-action: manipulation;
+                    }
 
-                statusElement.innerHTML =
-                    "🔴 <b>Di luar zona absensi</b>";
+                    .attendance-dropdown-trigger:hover {
+                        border-color: #b9d9c0;
+                        background: #f8fbf9;
+                    }
 
-                statusElement.style.color =
-                    "#dc2626";
-            }
-        }
+                    .attendance-dropdown.open .attendance-dropdown-trigger,
+                    .attendance-dropdown-trigger:focus-visible {
+                        border-color: #8bc997;
+                        box-shadow: 0 0 0 3px rgba(69,173,80,.10);
+                    }
 
-        // ==========================================================
-        // USER LOCATION
-        // ==========================================================
+                    .attendance-dropdown-value {
+                        flex: 1 1 auto;
+                        min-width: 0;
+                        overflow: hidden;
+                        white-space: nowrap;
+                        text-overflow: ellipsis;
+                    }
 
-        function updateUserPosition(
-            position
-        ) {
+                    .attendance-dropdown-arrow {
+                        flex: 0 0 auto;
+                        font-size: 14px;
+                        color: #6b7c72;
+                        transition: transform .16s ease;
+                    }
 
-            const latitude =
-                position.coords.latitude;
+                    .attendance-dropdown.open .attendance-dropdown-arrow {
+                        transform: rotate(180deg);
+                    }
 
-            const longitude =
-                position.coords.longitude;
+                    .attendance-dropdown-menu {
+                        position: absolute;
+                        left: 0;
+                        right: 0;
+                        top: calc(100% + 6px);
+                        width: 100%;
+                        max-height: min(250px, 42vh);
+                        overflow-y: auto;
+                        -webkit-overflow-scrolling: touch;
+                        overscroll-behavior: contain;
+                        padding: 5px;
+                        border: 1px solid #d9e7dd;
+                        border-radius: 10px;
+                        background: #ffffff;
+                        box-shadow: 0 10px 28px rgba(27,68,38,.16);
+                        display: none;
+                        z-index: 5000;
+                    }
 
-            const point = [
-                latitude,
-                longitude
-            ];
+                    .attendance-dropdown.open .attendance-dropdown-menu {
+                        display: block;
+                    }
 
-            if (!userMarker) {
+                    .attendance-dropdown-option {
+                        width: 100%;
+                        min-height: 42px;
+                        display: flex;
+                        align-items: center;
+                        padding: 9px 11px;
+                        border: 0;
+                        border-radius: 8px;
+                        background: transparent;
+                        color: #25313a;
+                        font-size: 14px;
+                        line-height: 1.3;
+                        text-align: left;
+                        cursor: pointer;
+                    }
 
-                userMarker =
-                    L.marker(
-                        point,
-                        {
-                            icon: userIcon(),
-                            zIndexOffset: 1000
+                    .attendance-dropdown-option:hover,
+                    .attendance-dropdown-option:focus-visible {
+                        background: #edf8ef;
+                        color: #236f37;
+                        outline: none;
+                    }
+
+                    .attendance-dropdown-option.selected {
+                        background: #e5f4e8;
+                        color: #236f37;
+                        font-weight: 700;
+                    }
+
+                    @media (max-width: 480px) {
+                        .attendance-dropdown-trigger {
+                            min-height: 48px;
+                            height: 48px;
+                            border-radius: 10px;
+                            padding: 0 12px;
+                            font-size: 16px;
                         }
-                    )
-                    .addTo(map)
-                    .bindPopup(
-                        "<b>You are here</b>"
-                    );
 
-            } else {
-
-                userMarker.setLatLng(
-                    point
-                );
-            }
-
-            /*
-             * Center on the user only on the
-             * first GPS fix, before a location
-             * is selected.
-             */
-            if (
-                !userCentered &&
-                !selectedAttendancePoint
-            ) {
-
-                map.setView(
-                    point,
-                    16,
-                    {
-                        animate: false
-                    }
-                );
-
-                userCentered = true;
-            }
-
-            /*
-             * Continuously evaluate geofence.
-             */
-            if (
-                selectedAttendancePoint
-            ) {
-
-                const distance =
-                    calculateDistanceMeters(
-                        latitude,
-                        longitude,
-                        selectedAttendancePoint[0],
-                        selectedAttendancePoint[1]
-                    );
-
-                updateGeofenceStatus(
-                    distance
-                );
-            }
-        }
-
-        function handleUserLocationError(
-            error
-        ) {
-
-            console.warn(
-                "Geolocation error:",
-                error
-            );
-
-            const statusElement =
-                document.getElementById(
-                    "geofenceStatus"
-                );
-
-            setCameraStartAccess(false);
-
-            if (statusElement) {
-
-                statusElement.innerHTML =
-                    "⚠️ <b>Lokasi perangkat belum tersedia</b>";
-
-                statusElement.style.color =
-                    "#b45309";
-            }
-        }
-
-        function startLiveLocation() {
-
-            if (
-                !navigator.geolocation
-            ) {
-
-                console.warn(
-                    "Geolocation is not supported."
-                );
-
-                return;
-            }
-
-            if (
-                userWatchId !== null
-            ) {
-
-                navigator.geolocation.clearWatch(
-                    userWatchId
-                );
-            }
-
-            userWatchId =
-                navigator.geolocation.watchPosition(
-                    updateUserPosition,
-                    handleUserLocationError,
-                    {
-                        enableHighAccuracy: true,
-                        maximumAge: 3000,
-                        timeout: 10000
-                    }
-                );
-        }
-
-        // ==========================================================
-        // CLEAR RED ZONE
-        // ==========================================================
-
-        function clearAttendanceMarker() {
-
-            if (
-                attendanceMarker
-            ) {
-
-                map.removeLayer(
-                    attendanceMarker
-                );
-
-                attendanceMarker = null;
-            }
-
-            if (
-                attendanceCircle
-            ) {
-
-                map.removeLayer(
-                    attendanceCircle
-                );
-
-                attendanceCircle = null;
-            }
-
-            selectedAttendancePoint = null;
-            setCameraStartAccess(false);
-
-            const statusElement =
-                document.getElementById(
-                    "geofenceStatus"
-                );
-
-            const distanceElement =
-                document.getElementById(
-                    "geofenceDistance"
-                );
-
-            if (statusElement) {
-
-                statusElement.innerHTML =
-                    "🔵 Pilih lokasi absensi";
-
-                statusElement.style.color =
-                    "#64748b";
-            }
-
-            if (distanceElement) {
-
-                distanceElement.textContent =
-                    "Radius zona absensi: " +
-                    GEOFENCE_RADIUS_METERS +
-                    " meter";
-            }
-        }
-
-        // ==========================================================
-        // SHOW SELECTED ATTENDANCE LOCATION
-        // ==========================================================
-
-        function showAttendanceLocation(
-            placeName
-        ) {
-
-            clearAttendanceMarker();
-
-            if (!placeName) {
-
-                setCameraStartAccess(false);
-
-                if (userMarker) {
-
-                    map.setView(
-                        userMarker.getLatLng(),
-                        16,
-                        {
-                            animate: true
+                        .attendance-dropdown-menu {
+                            top: calc(100% + 5px);
+                            max-height: min(245px, 45vh);
+                            padding: 4px;
+                            border-radius: 10px;
                         }
-                    );
 
-                } else {
-
-                    map.setView(
-                        DEFAULT_CENTER,
-                        17,
-                        {
-                            animate: true
+                        .attendance-dropdown-option {
+                            min-height: 44px;
+                            padding: 10px 11px;
+                            font-size: 16px;
                         }
-                    );
-                }
-
-                return;
-            }
-
-            const location =
-                ATTENDANCE_LOCATIONS[
-                    placeName
-                ];
-
-            if (!location) {
-
-                setCameraStartAccess(false);
-
-                const statusElement =
-                    document.getElementById(
-                        "geofenceStatus"
-                    );
-
-                const distanceElement =
-                    document.getElementById(
-                        "geofenceDistance"
-                    );
-
-                if (statusElement) {
-
-                    statusElement.innerHTML =
-                        "⚠️ <b>Koordinat lokasi belum tersedia</b>";
-
-                    statusElement.style.color =
-                        "#b45309";
-                }
-
-                if (distanceElement) {
-
-                    distanceElement.textContent =
-                        "Lokasi ini belum memiliki koordinat tetap.";
-                }
-
-                return;
-            }
-
-            const point = [
-                location.lat,
-                location.lng
-            ];
-
-            selectedAttendancePoint =
-                point;
-
-            // ======================================================
-            // RED ZONE - EXACTLY 60 METERS
-            // ======================================================
-
-            attendanceCircle =
-                L.circle(
-                    point,
-                    {
-                        radius:
-                            GEOFENCE_RADIUS_METERS,
-
-                        color:
-                            "#ef4444",
-
-                        weight:
-                            3,
-
-                        opacity:
-                            1,
-
-                        fillColor:
-                            "#ef4444",
-
-                        fillOpacity:
-                            0.25,
-
-                        interactive:
-                            false
                     }
-                ).addTo(map);
 
-            // ======================================================
-            // RED CENTER MARKER
-            // ======================================================
-
-            attendanceMarker =
-                L.circleMarker(
-                    point,
-                    {
-                        radius: 9,
-
-                        color:
-                            "#991b1b",
-
-                        weight:
-                            3,
-
-                        fillColor:
-                            "#ef4444",
-
-                        fillOpacity:
-                            1,
-
-                        pane:
-                            "markerPane"
+                    @media (orientation: landscape) and (max-width: 900px) {
+                        .attendance-dropdown-menu {
+                            max-height: min(220px, 60vh);
+                        }
                     }
-                )
-                .addTo(map);
 
-            // ======================================================
-            // POPUP
-            // ======================================================
+                    .geofence-note {
+                        margin-top: 10px;
+                        padding: 9px 11px;
+                        border-radius: 9px;
+                        background: #fff7f7;
+                        border: 1px solid #fee2e2;
+                        color: #7f1d1d;
+                        font-size: 12px;
+                        line-height: 1.5;
+                    }
 
-            attendanceMarker.bindPopup(
-                `
-                <div style="
-                    min-width:225px;
-                    font-family:Arial,sans-serif;
-                ">
-                    <div style="
-                        font-size:15px;
-                        font-weight:700;
-                        color:#194c2c;
-                        margin-bottom:7px;
-                    ">
-                        ${placeName}
+                    .leaflet-popup-content {
+                        margin: 11px 14px;
+                        font-family: Arial, sans-serif;
+                    }
+
+                    @media(max-width:700px) {
+                        #map {
+                            height: 320px;
+                        }
+
+                        .location-top,
+                        .location-form {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                        }
+
+                        .location-title {
+                            font-size: 17px;
+                        }
+                    }
+                    @media(max-width:480px) {
+                        .location-card {
+                            border-radius: 13px;
+                        }
+
+                        .location-top {
+                            min-height: 64px;
+                            padding: 13px 14px;
+                            flex-wrap: wrap;
+                            row-gap: 9px;
+                        }
+
+                        .location-title {
+                            font-size: 16px;
+                            gap: 8px;
+                            min-width: 0;
+                        }
+
+                        .location-target {
+                            width: 32px;
+                            height: 32px;
+                            flex: 0 0 32px;
+                        }
+
+                        .live-badge {
+                            font-size: 10px;
+                            padding: 5px 9px;
+                        }
+
+                        #map {
+                            height: clamp(260px, 70vw, 320px);
+                        }
+
+                        .location-form {
+                            padding: 14px;
+                        }
+
+                        .location-label {
+                            font-size: 14px;
+                            margin-bottom: 7px;
+                        }
+
+                        #attendanceLocation {
+                            height: 48px;
+                            min-height: 48px;
+                            padding: 0 38px 0 12px;
+                            font-size: 16px;
+                            border-radius: 10px;
+                        }
+
+                        #attendanceLocation option {
+                            font-size: 16px;
+                        }
+
+                        .geofence-note {
+                            font-size: 11px;
+                            padding: 8px 10px;
+                        }
+
+                        .leaflet-popup-content {
+                            max-width: calc(100vw - 80px);
+                            margin: 9px 10px;
+                            font-size: 12px;
+                        }
+                    }
+
+                    @media (orientation: landscape) and (max-width: 900px) {
+                        #map {
+                            height: clamp(240px, 58vh, 340px);
+                        }
+                    }
+                </style>
+            </head>
+
+            <body>
+                <div class="location-card">
+
+                    <div class="location-top">
+                        <div class="location-title">
+                            <span class="location-target">⌖</span>
+                            <span>Lokasi Perangkat</span>
+                        </div>
+
+                        <div class="live-badge">
+                            <span class="live-dot"></span>
+                            LIVE
+                        </div>
                     </div>
 
-                    <div style="
-                        font-size:12px;
-                        color:#475569;
-                        line-height:1.55;
-                    ">
-                        ${location.address}
-                    </div>
+                    <div id="map"></div>
 
-                    <div style="
-                        margin-top:9px;
-                        font-size:12px;
-                        color:#dc2626;
-                        font-weight:700;
-                    ">
-                        Zona absensi: 60 meter
-                    </div>
+                    <div class="location-form">
 
-                    <div style="
-                        margin-top:4px;
-                        font-size:11px;
-                        color:#64748b;
-                    ">
-                        ${location.lat},
-                        ${location.lng}
+                        <label class="location-label" for="attendanceLocation">
+                            Pilih Lokasi Absen
+                        </label>
+
+                        <!-- Hidden native select kept only as the existing value/event bridge. -->
+                        <select id="attendanceLocation" class="attendance-select-hidden" aria-hidden="true" tabindex="-1">
+                            <option value="">-- Pilih lokasi absen --</option>
+
+                            <option value="Klinik Utama Medialys">Klinik Utama Medialys</option>
+                            <option value="Mandiri DM 12">Mandiri DM 12</option>
+                            <option value="Medika DM 9">Medika DM 9</option>
+                            <option value="ISS DM 15">ISS DM 15</option>
+                            <option value="Klinik Medilab Pekalongan">Klinik Medilab Pekalongan</option>
+                            <option value="Treasury Office Tower">Treasury Office Tower</option>
+                            <option value="IMS">IMS</option>
+                            <option value="Sonic Service Center">Sonic Service Center</option>
+                            <option value="Kamal">Kamal</option>
+                            <option value="Logistik Medika DM 11">Logistik Medika DM 11</option>
+                            <option value="ITS Green Lake">ITS Green Lake</option>
+                            <option value="Pabrik Cikande">Pabrik Cikande</option>
+                        </select>
+
+                        <div class="attendance-dropdown" id="attendanceDropdown">
+                            <button
+                                type="button"
+                                class="attendance-dropdown-trigger"
+                                id="attendanceDropdownTrigger"
+                                aria-haspopup="listbox"
+                                aria-expanded="false"
+                            >
+                                <span class="attendance-dropdown-value" id="attendanceDropdownValue">
+                                    -- Pilih lokasi absen --
+                                </span>
+                                <span class="attendance-dropdown-arrow" aria-hidden="true">⌄</span>
+                            </button>
+
+                            <div
+                                class="attendance-dropdown-menu"
+                                id="attendanceDropdownMenu"
+                                role="listbox"
+                                aria-label="Daftar lokasi absen"
+                            >
+                                <button type="button" class="attendance-dropdown-option" data-value="">
+                                    -- Pilih lokasi absen --
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Klinik Utama Medialys">
+                                    Klinik Utama Medialys
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Mandiri DM 12">
+                                    Mandiri DM 12
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Medika DM 9">
+                                    Medika DM 9
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="ISS DM 15">
+                                    ISS DM 15
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Klinik Medilab Pekalongan">
+                                    Klinik Medilab Pekalongan
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Treasury Office Tower">
+                                    Treasury Office Tower
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="IMS">
+                                    IMS
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Sonic Service Center">
+                                    Sonic Service Center
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Kamal">
+                                    Kamal
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Logistik Medika DM 11">
+                                    Logistik Medika DM 11
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="ITS Green Lake">
+                                    ITS Green Lake
+                                </button>
+                                <button type="button" class="attendance-dropdown-option" data-value="Pabrik Cikande">
+                                    Pabrik Cikande
+                                </button>
+                            </div>
+                        </div>
+
+                        <div
+                            id="geofenceStatus"
+                            style="
+                                margin-top:12px;
+                                font-size:14px;
+                                font-weight:600;
+                                color:#64748b;
+                            "
+                        >
+                            🔵 Pilih lokasi absensi
+                        </div>
+
+                        <div
+                            id="geofenceDistance"
+                            style="
+                                margin-top:4px;
+                                font-size:13px;
+                                color:#64748b;
+                            "
+                        >
+                            Radius zona absensi: 60 meter
+                        </div>
+
+                        <div class="geofence-note">
+                            🔴 Lingkaran merah = zona absensi dengan radius tepat
+                            <b>60 meter</b> dari lokasi yang dipilih.
+                        </div>
+
+                        <div style="margin-top:10px;">
+                            <a
+                                id="googleMapsLocationLink"
+                                href="#"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style="
+                                    display:inline-block;
+                                    padding:7px 10px;
+                                    border-radius:8px;
+                                    background:#f1f5f9;
+                                    color:#334155;
+                                    font-size:12px;
+                                    text-decoration:none;
+                                    border:1px solid #dbe4ea;
+                                "
+                            >
+                                📍 Buka lokasi di Google Maps
+                            </a>
+                        </div>
+
                     </div>
                 </div>
-                `
-            );
 
-            // ======================================================
-            // STATUS
-            // ======================================================
+                <!-- Leaflet JS -->
+                <script
+                    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+                    crossorigin=""
+                ></script>
 
-            const statusElement =
-                document.getElementById(
-                    "geofenceStatus"
-                );
+                <script>
+                    // ==========================================================
+                    // MAP CONFIGURATION
+                    // ==========================================================
 
-            const distanceElement =
-                document.getElementById(
-                    "geofenceDistance"
-                );
+                    const GEOFENCE_RADIUS_METERS = 7000;
 
-            if (statusElement) {
+                    /*
+                     * IMPORTANT:
+                     * Both locations below have FIXED coordinates.
+                     * No geocoding API is required.
+                     */
 
-                statusElement.innerHTML =
-                    "📍 <b>" +
-                    placeName +
-                    " dipilih</b>";
+                    const ATTENDANCE_LOCATIONS = {
+                        "Klinik Utama Medialys": {
+                            lat: -6.174145501357489,
+                            lng: 106.85686667301668,
+                            address:
+                                "504D, Jl. Letjen Suprapto No. 504C, " +
+                                "Cemp. Putih Bar., Kec. Johar Baru, Jakarta 10530"
+                        },
 
-                statusElement.style.color =
-                    "#2563eb";
-            }
+                        "Mandiri DM 12": {
+                            lat: -6.152604321020155,
+                            lng: 106.6940247365544,
+                            address: "Mandiri DM 12"
+                        },
 
-            if (distanceElement) {
+                        "Medika DM 9": {
+                            lat: -6.153692357716074,
+                            lng: 106.69404619422662,
+                            address: "Medika DM 9"
+                        },
 
-                distanceElement.textContent =
-                    "Zona absensi memiliki radius tepat " +
-                    GEOFENCE_RADIUS_METERS +
-                    " meter";
-            }
+                        "ISS DM 15": {
+                            lat: -6.151194,
+                            lng: 106.695256,
+                            address: "ISS DM 15"
+                        }
+                    };
 
-            // ======================================================
-            // GOOGLE MAPS LINK
-            // ======================================================
+                    const DEFAULT_CENTER = [
+                        -6.174145501357489,
+                        106.85686667301668
+                    ];
 
-            const googleMapsLocationLink =
-                document.getElementById(
-                    "googleMapsLocationLink"
-                );
+                    // ==========================================================
+                    // MAP CREATION
+                    // ==========================================================
 
-            if (
-                googleMapsLocationLink
-            ) {
+                    let map = null;
+                    let userMarker = null;
+                    let userWatchId = null;
 
-                googleMapsLocationLink.href =
-                    "https://www.google.com/maps/search/?api=1&query=" +
-                    encodeURIComponent(
-                        location.lat +
-                        "," +
-                        location.lng
-                    );
+                    let attendanceMarker = null;
+                    let attendanceCircle = null;
+                    let selectedAttendancePoint = null;
+                    let userCentered = false;
 
-                googleMapsLocationLink.textContent =
-                    "📍 Buka " +
-                    placeName +
-                    " di Google Maps";
-            }
+                    function initMap() {
 
-            // ======================================================
-            // FOCUS ON SELECTED PLACE
-            // ======================================================
-
-            map.setView(
-                point,
-                17,
-                {
-                    animate: true
-                }
-            );
-
-            // ======================================================
-            // INITIAL DISTANCE CHECK
-            // ======================================================
-
-            if (userMarker) {
-
-                const userPoint =
-                    userMarker.getLatLng();
-
-                const distance =
-                    calculateDistanceMeters(
-                        userPoint.lat,
-                        userPoint.lng,
-                        point[0],
-                        point[1]
-                    );
-
-                updateGeofenceStatus(
-                    distance
-                );
-            }
-        }
-
-        // ==========================================================
-        // DOM ELEMENTS
-        // ==========================================================
-
-        const attendanceLocationSelect =
-            document.getElementById(
-                "attendanceLocation"
-            );
-
-        const attendanceDropdown =
-            document.getElementById(
-                "attendanceDropdown"
-            );
-
-        const attendanceDropdownTrigger =
-            document.getElementById(
-                "attendanceDropdownTrigger"
-            );
-
-        const attendanceDropdownMenu =
-            document.getElementById(
-                "attendanceDropdownMenu"
-            );
-
-        const attendanceDropdownValue =
-            document.getElementById(
-                "attendanceDropdownValue"
-            );
-
-        function closeAttendanceDropdown() {
-            if (!attendanceDropdown) {
-                return;
-            }
-
-            attendanceDropdown.classList.remove("open");
-
-            if (attendanceDropdownTrigger) {
-                attendanceDropdownTrigger.setAttribute(
-                    "aria-expanded",
-                    "false"
-                );
-            }
-        }
-
-        function openAttendanceDropdown() {
-            if (!attendanceDropdown) {
-                return;
-            }
-
-            attendanceDropdown.classList.add("open");
-
-            if (attendanceDropdownTrigger) {
-                attendanceDropdownTrigger.setAttribute(
-                    "aria-expanded",
-                    "true"
-                );
-            }
-        }
-
-        function syncAttendanceDropdown(value) {
-            if (!attendanceDropdownValue) {
-                return;
-            }
-
-            const selectedOption =
-                attendanceDropdownMenu
-                    ? attendanceDropdownMenu.querySelector(
-                        '[data-value="' +
-                        CSS.escape(value) +
-                        '"]'
-                    )
-                    : null;
-
-            attendanceDropdownValue.textContent =
-                selectedOption
-                    ? selectedOption.textContent.trim()
-                    : "-- Pilih lokasi absen --";
-
-            if (attendanceDropdownMenu) {
-                attendanceDropdownMenu
-                    .querySelectorAll(
-                        ".attendance-dropdown-option"
-                    )
-                    .forEach(function(option) {
-                        option.classList.toggle(
-                            "selected",
-                            option.getAttribute("data-value") === value
-                        );
-                    });
-            }
-        }
-
-        if (
-            attendanceLocationSelect
-        ) {
-
-            attendanceLocationSelect.addEventListener(
-                "change",
-                function (event) {
-                    syncAttendanceDropdown(
-                        event.target.value
-                    );
-
-                    showAttendanceLocation(
-                        event.target.value
-                    );
-                }
-            );
-        }
-
-        if (
-            attendanceDropdownTrigger
-        ) {
-            attendanceDropdownTrigger.addEventListener(
-                "click",
-                function () {
-                    if (
-                        attendanceDropdown &&
-                        attendanceDropdown.classList.contains("open")
-                    ) {
-                        closeAttendanceDropdown();
-                    } else {
-                        openAttendanceDropdown();
-                    }
-                }
-            );
-        }
-
-        if (
-            attendanceDropdownMenu &&
-            attendanceLocationSelect
-        ) {
-            attendanceDropdownMenu
-                .querySelectorAll(
-                    ".attendance-dropdown-option"
-                )
-                .forEach(function(option) {
-
-                    option.addEventListener(
-                        "click",
-                        function () {
-                            const value =
-                                option.getAttribute(
-                                    "data-value"
-                                ) || "";
-
-                            attendanceLocationSelect.value =
-                                value;
-
-                            attendanceLocationSelect.dispatchEvent(
-                                new Event(
-                                    "change",
-                                    { bubbles: true }
-                                )
+                        if (typeof L === "undefined") {
+                            console.error(
+                                "Leaflet failed to load from CDN."
                             );
 
-                            closeAttendanceDropdown();
+                            const mapElement =
+                                document.getElementById("map");
+
+                            if (mapElement) {
+                                mapElement.innerHTML =
+                                    "<div style='" +
+                                    "padding:30px;" +
+                                    "text-align:center;" +
+                                    "color:#b91c1c;" +
+                                    "font-family:Arial,sans-serif;" +
+                                    "'>" +
+                                    "<b>Map gagal dimuat.</b><br>" +
+                                    "Periksa koneksi internet / akses CDN Leaflet." +
+                                    "</div>";
+                            }
+
+                            return false;
+                        }
+
+                        map = L.map(
+                            "map",
+                            {
+                                zoomControl: true,
+                                attributionControl: true,
+                                preferCanvas: true
+                            }
+                        ).setView(
+                            DEFAULT_CENTER,
+                            17
+                        );
+
+                        L.tileLayer(
+                            "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                            {
+                                maxZoom: 19,
+                                detectRetina: true,
+                                attribution:
+                                    "&copy; OpenStreetMap contributors"
+                            }
+                        ).addTo(map);
+
+                        setTimeout(
+                            function () {
+                                map.invalidateSize(true);
+                            },
+                            250
+                        );
+
+                        setTimeout(
+                            function () {
+                                map.invalidateSize(true);
+                            },
+                            800
+                        );
+
+                        return true;
+                    }
+
+                    // ==========================================================
+                    // USER ICON
+                    // ==========================================================
+
+                    function userIcon() {
+
+                        return L.icon({
+                            iconUrl:
+                                "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+
+                            iconRetinaUrl:
+                                "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+
+                            shadowUrl:
+                                "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+
+                            iconSize: [25, 41],
+                            iconAnchor: [12, 41],
+                            popupAnchor: [1, -34],
+                            shadowSize: [41, 41]
+                        });
+                    }
+
+                    // ==========================================================
+                    // HAVERSINE DISTANCE
+                    // ==========================================================
+
+                    function calculateDistanceMeters(
+                        lat1,
+                        lon1,
+                        lat2,
+                        lon2
+                    ) {
+
+                        const R = 6371000;
+
+                        const dLat =
+                            (lat2 - lat1) *
+                            Math.PI / 180;
+
+                        const dLon =
+                            (lon2 - lon1) *
+                            Math.PI / 180;
+
+                        const a =
+                            Math.sin(dLat / 2) *
+                            Math.sin(dLat / 2) +
+
+                            Math.cos(
+                                lat1 * Math.PI / 180
+                            ) *
+
+                            Math.cos(
+                                lat2 * Math.PI / 180
+                            ) *
+
+                            Math.sin(dLon / 2) *
+                            Math.sin(dLon / 2);
+
+                        const c =
+                            2 *
+                            Math.atan2(
+                                Math.sqrt(a),
+                                Math.sqrt(1 - a)
+                            );
+
+                        return R * c;
+                    }
+
+                    // ==========================================================
+                    // GEOFENCE STATUS
+                    // ==========================================================
+
+                    // ==========================================================
+                    // CAMERA START GATE
+                    // ==========================================================
+                    // The map remains inside the original iframe. Because this iframe is
+                    // same-origin with the Streamlit app, it can update the existing
+                    // Streamlit START button directly without replacing the map UI.
+                    let geofenceAllowsCamera = false;
+
+                    function setCameraStartAccess(allowed) {
+
+                        geofenceAllowsCamera = Boolean(allowed);
+
+                        try {
+                            const parentDocument = window.parent.document;
+                            const buttons = parentDocument.querySelectorAll("button");
+
+                            buttons.forEach(function(button) {
+                                const text = (button.innerText || "").trim();
+
+                                if (text === "START") {
+                                    button.disabled = !geofenceAllowsCamera;
+                                    button.setAttribute(
+                                        "aria-disabled",
+                                        geofenceAllowsCamera ? "false" : "true"
+                                    );
+
+                                    if (geofenceAllowsCamera) {
+                                        button.title = "Webcam dapat dimulai di dalam zona absensi.";
+                                    } else {
+                                        button.title = "START terkunci. Anda harus berada di dalam zona merah.";
+                                    }
+                                }
+                            });
+                        } catch (error) {
+                            console.warn("Unable to update camera START button:", error);
+                        }
+                    }
+
+                    function updateGeofenceStatus(
+                        distance
+                    ) {
+
+                        const statusElement =
+                            document.getElementById(
+                                "geofenceStatus"
+                            );
+
+                        const distanceElement =
+                            document.getElementById(
+                                "geofenceDistance"
+                            );
+
+                        if (
+                            !statusElement ||
+                            !distanceElement
+                        ) {
+                            return;
+                        }
+
+                        const roundedDistance =
+                            Math.round(distance);
+
+                        distanceElement.textContent =
+                            "Jarak dari lokasi absen: " +
+                            roundedDistance +
+                            " meter";
+
+                        const allowed =
+                            distance <=
+                            GEOFENCE_RADIUS_METERS;
+
+                        setCameraStartAccess(allowed);
+
+                        if (allowed) {
+
+                            statusElement.innerHTML =
+                                "🟢 <b>Dalam zona absensi</b>";
+
+                            statusElement.style.color =
+                                "#15803d";
+
+                        } else {
+
+                            statusElement.innerHTML =
+                                "🔴 <b>Di luar zona absensi</b>";
+
+                            statusElement.style.color =
+                                "#dc2626";
+                        }
+                    }
+
+                    // ==========================================================
+                    // USER LOCATION
+                    // ==========================================================
+
+                    function updateUserPosition(
+                        position
+                    ) {
+
+                        const latitude =
+                            position.coords.latitude;
+
+                        const longitude =
+                            position.coords.longitude;
+
+                        const point = [
+                            latitude,
+                            longitude
+                        ];
+
+                        if (!userMarker) {
+
+                            userMarker =
+                                L.marker(
+                                    point,
+                                    {
+                                        icon: userIcon(),
+                                        zIndexOffset: 1000
+                                    }
+                                )
+                                .addTo(map)
+                                .bindPopup(
+                                    "<b>You are here</b>"
+                                );
+
+                        } else {
+
+                            userMarker.setLatLng(
+                                point
+                            );
+                        }
+
+                        /*
+                         * Center on the user only on the
+                         * first GPS fix, before a location
+                         * is selected.
+                         */
+                        if (
+                            !userCentered &&
+                            !selectedAttendancePoint
+                        ) {
+
+                            map.setView(
+                                point,
+                                16,
+                                {
+                                    animate: false
+                                }
+                            );
+
+                            userCentered = true;
+                        }
+
+                        /*
+                         * Continuously evaluate geofence.
+                         */
+                        if (
+                            selectedAttendancePoint
+                        ) {
+
+                            const distance =
+                                calculateDistanceMeters(
+                                    latitude,
+                                    longitude,
+                                    selectedAttendancePoint[0],
+                                    selectedAttendancePoint[1]
+                                );
+
+                            updateGeofenceStatus(
+                                distance
+                            );
+                        }
+                    }
+
+                    function handleUserLocationError(
+                        error
+                    ) {
+
+                        console.warn(
+                            "Geolocation error:",
+                            error
+                        );
+
+                        const statusElement =
+                            document.getElementById(
+                                "geofenceStatus"
+                            );
+
+                        setCameraStartAccess(false);
+
+                        if (statusElement) {
+
+                            statusElement.innerHTML =
+                                "⚠️ <b>Lokasi perangkat belum tersedia</b>";
+
+                            statusElement.style.color =
+                                "#b45309";
+                        }
+                    }
+
+                    function startLiveLocation() {
+
+                        if (
+                            !navigator.geolocation
+                        ) {
+
+                            console.warn(
+                                "Geolocation is not supported."
+                            );
+
+                            return;
+                        }
+
+                        if (
+                            userWatchId !== null
+                        ) {
+
+                            navigator.geolocation.clearWatch(
+                                userWatchId
+                            );
+                        }
+
+                        userWatchId =
+                            navigator.geolocation.watchPosition(
+                                updateUserPosition,
+                                handleUserLocationError,
+                                {
+                                    enableHighAccuracy: true,
+                                    maximumAge: 3000,
+                                    timeout: 10000
+                                }
+                            );
+                    }
+
+                    // ==========================================================
+                    // CLEAR RED ZONE
+                    // ==========================================================
+
+                    function clearAttendanceMarker() {
+
+                        if (
+                            attendanceMarker
+                        ) {
+
+                            map.removeLayer(
+                                attendanceMarker
+                            );
+
+                            attendanceMarker = null;
+                        }
+
+                        if (
+                            attendanceCircle
+                        ) {
+
+                            map.removeLayer(
+                                attendanceCircle
+                            );
+
+                            attendanceCircle = null;
+                        }
+
+                        selectedAttendancePoint = null;
+                        setCameraStartAccess(false);
+
+                        const statusElement =
+                            document.getElementById(
+                                "geofenceStatus"
+                            );
+
+                        const distanceElement =
+                            document.getElementById(
+                                "geofenceDistance"
+                            );
+
+                        if (statusElement) {
+
+                            statusElement.innerHTML =
+                                "🔵 Pilih lokasi absensi";
+
+                            statusElement.style.color =
+                                "#64748b";
+                        }
+
+                        if (distanceElement) {
+
+                            distanceElement.textContent =
+                                "Radius zona absensi: " +
+                                GEOFENCE_RADIUS_METERS +
+                                " meter";
+                        }
+                    }
+
+                    // ==========================================================
+                    // SHOW SELECTED ATTENDANCE LOCATION
+                    // ==========================================================
+
+                    function showAttendanceLocation(
+                        placeName
+                    ) {
+
+                        clearAttendanceMarker();
+
+                        if (!placeName) {
+
+                            setCameraStartAccess(false);
+
+                            if (userMarker) {
+
+                                map.setView(
+                                    userMarker.getLatLng(),
+                                    16,
+                                    {
+                                        animate: true
+                                    }
+                                );
+
+                            } else {
+
+                                map.setView(
+                                    DEFAULT_CENTER,
+                                    17,
+                                    {
+                                        animate: true
+                                    }
+                                );
+                            }
+
+                            return;
+                        }
+
+                        const location =
+                            ATTENDANCE_LOCATIONS[
+                                placeName
+                            ];
+
+                        if (!location) {
+
+                            setCameraStartAccess(false);
+
+                            const statusElement =
+                                document.getElementById(
+                                    "geofenceStatus"
+                                );
+
+                            const distanceElement =
+                                document.getElementById(
+                                    "geofenceDistance"
+                                );
+
+                            if (statusElement) {
+
+                                statusElement.innerHTML =
+                                    "⚠️ <b>Koordinat lokasi belum tersedia</b>";
+
+                                statusElement.style.color =
+                                    "#b45309";
+                            }
+
+                            if (distanceElement) {
+
+                                distanceElement.textContent =
+                                    "Lokasi ini belum memiliki koordinat tetap.";
+                            }
+
+                            return;
+                        }
+
+                        const point = [
+                            location.lat,
+                            location.lng
+                        ];
+
+                        selectedAttendancePoint =
+                            point;
+
+                        // ======================================================
+                        // RED ZONE - EXACTLY 60 METERS
+                        // ======================================================
+
+                        attendanceCircle =
+                            L.circle(
+                                point,
+                                {
+                                    radius:
+                                        GEOFENCE_RADIUS_METERS,
+
+                                    color:
+                                        "#ef4444",
+
+                                    weight:
+                                        3,
+
+                                    opacity:
+                                        1,
+
+                                    fillColor:
+                                        "#ef4444",
+
+                                    fillOpacity:
+                                        0.25,
+
+                                    interactive:
+                                        false
+                                }
+                            ).addTo(map);
+
+                        // ======================================================
+                        // RED CENTER MARKER
+                        // ======================================================
+
+                        attendanceMarker =
+                            L.circleMarker(
+                                point,
+                                {
+                                    radius: 9,
+
+                                    color:
+                                        "#991b1b",
+
+                                    weight:
+                                        3,
+
+                                    fillColor:
+                                        "#ef4444",
+
+                                    fillOpacity:
+                                        1,
+
+                                    pane:
+                                        "markerPane"
+                                }
+                            )
+                            .addTo(map);
+
+                        // ======================================================
+                        // POPUP
+                        // ======================================================
+
+                        attendanceMarker.bindPopup(
+                            `
+                            <div style="
+                                min-width:225px;
+                                font-family:Arial,sans-serif;
+                            ">
+                                <div style="
+                                    font-size:15px;
+                                    font-weight:700;
+                                    color:#194c2c;
+                                    margin-bottom:7px;
+                                ">
+                                    ${placeName}
+                                </div>
+
+                                <div style="
+                                    font-size:12px;
+                                    color:#475569;
+                                    line-height:1.55;
+                                ">
+                                    ${location.address}
+                                </div>
+
+                                <div style="
+                                    margin-top:9px;
+                                    font-size:12px;
+                                    color:#dc2626;
+                                    font-weight:700;
+                                ">
+                                    Zona absensi: 60 meter
+                                </div>
+
+                                <div style="
+                                    margin-top:4px;
+                                    font-size:11px;
+                                    color:#64748b;
+                                ">
+                                    ${location.lat},
+                                    ${location.lng}
+                                </div>
+                            </div>
+                            `
+                        );
+
+                        // ======================================================
+                        // STATUS
+                        // ======================================================
+
+                        const statusElement =
+                            document.getElementById(
+                                "geofenceStatus"
+                            );
+
+                        const distanceElement =
+                            document.getElementById(
+                                "geofenceDistance"
+                            );
+
+                        if (statusElement) {
+
+                            statusElement.innerHTML =
+                                "📍 <b>" +
+                                placeName +
+                                " dipilih</b>";
+
+                            statusElement.style.color =
+                                "#2563eb";
+                        }
+
+                        if (distanceElement) {
+
+                            distanceElement.textContent =
+                                "Zona absensi memiliki radius tepat " +
+                                GEOFENCE_RADIUS_METERS +
+                                " meter";
+                        }
+
+                        // ======================================================
+                        // GOOGLE MAPS LINK
+                        // ======================================================
+
+                        const googleMapsLocationLink =
+                            document.getElementById(
+                                "googleMapsLocationLink"
+                            );
+
+                        if (
+                            googleMapsLocationLink
+                        ) {
+
+                            googleMapsLocationLink.href =
+                                "https://www.google.com/maps/search/?api=1&query=" +
+                                encodeURIComponent(
+                                    location.lat +
+                                    "," +
+                                    location.lng
+                                );
+
+                            googleMapsLocationLink.textContent =
+                                "📍 Buka " +
+                                placeName +
+                                " di Google Maps";
+                        }
+
+                        // ======================================================
+                        // FOCUS ON SELECTED PLACE
+                        // ======================================================
+
+                        map.setView(
+                            point,
+                            17,
+                            {
+                                animate: true
+                            }
+                        );
+
+                        // ======================================================
+                        // INITIAL DISTANCE CHECK
+                        // ======================================================
+
+                        if (userMarker) {
+
+                            const userPoint =
+                                userMarker.getLatLng();
+
+                            const distance =
+                                calculateDistanceMeters(
+                                    userPoint.lat,
+                                    userPoint.lng,
+                                    point[0],
+                                    point[1]
+                                );
+
+                            updateGeofenceStatus(
+                                distance
+                            );
+                        }
+                    }
+
+                    // ==========================================================
+                    // DOM ELEMENTS
+                    // ==========================================================
+
+                    const attendanceLocationSelect =
+                        document.getElementById(
+                            "attendanceLocation"
+                        );
+
+                    const attendanceDropdown =
+                        document.getElementById(
+                            "attendanceDropdown"
+                        );
+
+                    const attendanceDropdownTrigger =
+                        document.getElementById(
+                            "attendanceDropdownTrigger"
+                        );
+
+                    const attendanceDropdownMenu =
+                        document.getElementById(
+                            "attendanceDropdownMenu"
+                        );
+
+                    const attendanceDropdownValue =
+                        document.getElementById(
+                            "attendanceDropdownValue"
+                        );
+
+                    function closeAttendanceDropdown() {
+                        if (!attendanceDropdown) {
+                            return;
+                        }
+
+                        attendanceDropdown.classList.remove("open");
+
+                        if (attendanceDropdownTrigger) {
+                            attendanceDropdownTrigger.setAttribute(
+                                "aria-expanded",
+                                "false"
+                            );
+                        }
+                    }
+
+                    function openAttendanceDropdown() {
+                        if (!attendanceDropdown) {
+                            return;
+                        }
+
+                        attendanceDropdown.classList.add("open");
+
+                        if (attendanceDropdownTrigger) {
+                            attendanceDropdownTrigger.setAttribute(
+                                "aria-expanded",
+                                "true"
+                            );
+                        }
+                    }
+
+                    function syncAttendanceDropdown(value) {
+                        if (!attendanceDropdownValue) {
+                            return;
+                        }
+
+                        const selectedOption =
+                            attendanceDropdownMenu
+                                ? attendanceDropdownMenu.querySelector(
+                                    '[data-value="' +
+                                    CSS.escape(value) +
+                                    '"]'
+                                )
+                                : null;
+
+                        attendanceDropdownValue.textContent =
+                            selectedOption
+                                ? selectedOption.textContent.trim()
+                                : "-- Pilih lokasi absen --";
+
+                        if (attendanceDropdownMenu) {
+                            attendanceDropdownMenu
+                                .querySelectorAll(
+                                    ".attendance-dropdown-option"
+                                )
+                                .forEach(function(option) {
+                                    option.classList.toggle(
+                                        "selected",
+                                        option.getAttribute("data-value") === value
+                                    );
+                                });
+                        }
+                    }
+
+                    if (
+                        attendanceLocationSelect
+                    ) {
+
+                        attendanceLocationSelect.addEventListener(
+                            "change",
+                            function (event) {
+                                syncAttendanceDropdown(
+                                    event.target.value
+                                );
+
+                                showAttendanceLocation(
+                                    event.target.value
+                                );
+                            }
+                        );
+                    }
+
+                    if (
+                        attendanceDropdownTrigger
+                    ) {
+                        attendanceDropdownTrigger.addEventListener(
+                            "click",
+                            function () {
+                                if (
+                                    attendanceDropdown &&
+                                    attendanceDropdown.classList.contains("open")
+                                ) {
+                                    closeAttendanceDropdown();
+                                } else {
+                                    openAttendanceDropdown();
+                                }
+                            }
+                        );
+                    }
+
+                    if (
+                        attendanceDropdownMenu &&
+                        attendanceLocationSelect
+                    ) {
+                        attendanceDropdownMenu
+                            .querySelectorAll(
+                                ".attendance-dropdown-option"
+                            )
+                            .forEach(function(option) {
+
+                                option.addEventListener(
+                                    "click",
+                                    function () {
+                                        const value =
+                                            option.getAttribute(
+                                                "data-value"
+                                            ) || "";
+
+                                        attendanceLocationSelect.value =
+                                            value;
+
+                                        attendanceLocationSelect.dispatchEvent(
+                                            new Event(
+                                                "change",
+                                                { bubbles: true }
+                                            )
+                                        );
+
+                                        closeAttendanceDropdown();
+                                    }
+                                );
+                            });
+                    }
+
+                    document.addEventListener(
+                        "click",
+                        function (event) {
+                            if (
+                                attendanceDropdown &&
+                                !attendanceDropdown.contains(
+                                    event.target
+                                )
+                            ) {
+                                closeAttendanceDropdown();
+                            }
                         }
                     );
-                });
-        }
 
-        document.addEventListener(
-            "click",
-            function (event) {
-                if (
-                    attendanceDropdown &&
-                    !attendanceDropdown.contains(
-                        event.target
-                    )
-                ) {
-                    closeAttendanceDropdown();
-                }
-            }
-        );
-
-        document.addEventListener(
-            "keydown",
-            function (event) {
-                if (event.key === "Escape") {
-                    closeAttendanceDropdown();
-                }
-            }
-        );
-
-        // ==========================================================
-        // INITIALIZE
-        // ==========================================================
-
-        function initializeLocationPage() {
-
-            const mapReady =
-                initMap();
-
-            if (!mapReady) {
-                return;
-            }
-
-            // Start browser GPS.
-            setCameraStartAccess(false);
-            startLiveLocation();
-
-            // Streamlit can replace the START button DOM after reruns.
-            // Re-apply the current geofence decision without changing UI/layout.
-            setInterval(function () {
-                setCameraStartAccess(geofenceAllowsCamera);
-            }, 500);
-
-            // Make sure Leaflet recalculates iframe dimensions.
-            setTimeout(
-                function () {
-                    map.invalidateSize(true);
-                },
-                300
-            );
-
-            setTimeout(
-                function () {
-                    map.invalidateSize(true);
-                },
-                1000
-            );
-
-            /*
-             * IMPORTANT:
-             * Some browsers restore the last <select> value after
-             * a Streamlit rerender. If that happens, immediately
-             * rebuild the corresponding 60 m red zone.
-             */
-            if (
-                attendanceLocationSelect
-            ) {
-                syncAttendanceDropdown(
-                    attendanceLocationSelect.value
-                );
-
-                if (
-                    attendanceLocationSelect.value
-                ) {
-                    showAttendanceLocation(
-                        attendanceLocationSelect.value
-                    );
-                }
-            }
-        }
-
-        function refreshMapSize() {
-            if (typeof map !== "undefined" && map) {
-                setTimeout(function () {
-                    map.invalidateSize(true);
-                }, 120);
-            }
-        }
-
-        window.addEventListener("resize", refreshMapSize);
-        window.addEventListener("orientationchange", function () {
-            setTimeout(refreshMapSize, 250);
-        });
-
-        window.addEventListener(
-            "beforeunload",
-            function () {
-
-                if (
-                    userWatchId !== null &&
-                    navigator.geolocation
-                ) {
-
-                    navigator.geolocation.clearWatch(
-                        userWatchId
+                    document.addEventListener(
+                        "keydown",
+                        function (event) {
+                            if (event.key === "Escape") {
+                                closeAttendanceDropdown();
+                            }
+                        }
                     );
 
-                    userWatchId = null;
-                }
-            }
-        );
+                    // ==========================================================
+                    // INITIALIZE
+                    // ==========================================================
 
-        /*
-         * Wait until the iframe DOM has fully loaded.
-         * This avoids initializing Leaflet before #map exists.
-         */
-        if (
-            document.readyState ===
-            "loading"
-        ) {
+                    function initializeLocationPage() {
 
-            document.addEventListener(
-                "DOMContentLoaded",
-                initializeLocationPage,
-                { once: true }
-            );
+                        const mapReady =
+                            initMap();
 
-        } else {
+                        if (!mapReady) {
+                            return;
+                        }
 
-            initializeLocationPage();
-        }
-    </script>
-</body>
-</html>
-"""
+                        // Start browser GPS.
+                        setCameraStartAccess(false);
+                        startLiveLocation();
+
+                        // Streamlit can replace the START button DOM after reruns.
+                        // Re-apply the current geofence decision without changing UI/layout.
+                        setInterval(function () {
+                            setCameraStartAccess(geofenceAllowsCamera);
+                        }, 500);
+
+                        // Make sure Leaflet recalculates iframe dimensions.
+                        setTimeout(
+                            function () {
+                                map.invalidateSize(true);
+                            },
+                            300
+                        );
+
+                        setTimeout(
+                            function () {
+                                map.invalidateSize(true);
+                            },
+                            1000
+                        );
+
+                        /*
+                         * IMPORTANT:
+                         * Some browsers restore the last <select> value after
+                         * a Streamlit rerender. If that happens, immediately
+                         * rebuild the corresponding 60 m red zone.
+                         */
+                        if (
+                            attendanceLocationSelect
+                        ) {
+                            syncAttendanceDropdown(
+                                attendanceLocationSelect.value
+                            );
+
+                            if (
+                                attendanceLocationSelect.value
+                            ) {
+                                showAttendanceLocation(
+                                    attendanceLocationSelect.value
+                                );
+                            }
+                        }
+                    }
+
+                    function refreshMapSize() {
+                        if (typeof map !== "undefined" && map) {
+                            setTimeout(function () {
+                                map.invalidateSize(true);
+                            }, 120);
+                        }
+                    }
+
+                    window.addEventListener("resize", refreshMapSize);
+                    window.addEventListener("orientationchange", function () {
+                        setTimeout(refreshMapSize, 250);
+                    });
+
+                    window.addEventListener(
+                        "beforeunload",
+                        function () {
+
+                            if (
+                                userWatchId !== null &&
+                                navigator.geolocation
+                            ) {
+
+                                navigator.geolocation.clearWatch(
+                                    userWatchId
+                                );
+
+                                userWatchId = null;
+                            }
+                        }
+                    );
+
+                    /*
+                     * Wait until the iframe DOM has fully loaded.
+                     * This avoids initializing Leaflet before #map exists.
+                     */
+                    if (
+                        document.readyState ===
+                        "loading"
+                    ) {
+
+                        document.addEventListener(
+                            "DOMContentLoaded",
+                            initializeLocationPage,
+                            { once: true }
+                        );
+
+                    } else {
+
+                        initializeLocationPage();
+                    }
+                </script>
+            </body>
+            </html>
+    """
 
     # Desktop gets extra iframe height so the dropdown can open downward
     # outside the card without being clipped by the iframe viewport.
@@ -5064,10 +5070,10 @@ def show_dashboard():
 
     render_html('<div style="height:18px;"></div>')
 
-    # Keep the original visual order: Live Location on top,
-    # Live Camera Detection directly below it.
-    render_camera_section()
+    render_html('<div style="height:18px;"></div>')
 
+    # Live Camera Detection remains below Live Location.
+    render_camera_section()
 
 # CAMERA VIEW
 # ==========================================================
@@ -5535,7 +5541,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
