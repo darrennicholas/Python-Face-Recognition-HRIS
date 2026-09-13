@@ -1197,6 +1197,7 @@ def apply_dashboard_css():
             padding:0 !important;
 
             overflow-x:hidden !important;
+            overflow-anchor:none !important;
 
             background:#f2f8f4 !important;
         }}
@@ -1273,6 +1274,7 @@ def apply_dashboard_css():
             width:
                 calc(100% - {content_margin})
                 !important;
+            overflow-anchor:none !important;
 
             max-width:none !important;
 
@@ -1911,6 +1913,7 @@ def apply_dashboard_css():
 
         .camera-webrtc-shell {{
             width:100% !important;
+            overflow-anchor:none !important;
             min-height:360px !important;
             background:#ffffff !important;
             border:1px solid #d7e8dc !important;
@@ -4961,13 +4964,37 @@ def show_dashboard():
                         setCameraStartAccess(false);
                         startLiveLocation();
 
-                        // Streamlit can replace the START button DOM after reruns.
-                        // Re-apply the current geofence decision without changing UI/layout.
-                        setInterval(function () {
-                            setCameraStartAccess(geofenceAllowsCamera);
-                        }, 500);
+                        // Streamlit may replace the START button after a rerun.
+                        // Use a lightweight MutationObserver instead of a 500 ms timer.
+                        // This avoids unnecessary DOM writes/reflows while the user scrolls.
+                        if (!window.__hrStartAccessObserver) {
+                            window.__hrStartAccessObserver = new MutationObserver(
+                                function () {
+                                    setCameraStartAccess(geofenceAllowsCamera);
+                                }
+                            );
+
+                            try {
+                                window.__hrStartAccessObserver.observe(
+                                    window.parent.document.body,
+                                    {
+                                        childList: true,
+                                        subtree: true
+                                    }
+                                );
+                            } catch (error) {
+                                console.warn(
+                                    "Unable to observe Streamlit DOM for START button:",
+                                    error
+                                );
+                            }
+                        }
+
+                        setCameraStartAccess(geofenceAllowsCamera);
 
                         // Make sure Leaflet recalculates iframe dimensions.
+                        // IMPORTANT: never change the parent page scroll position here.
+                        // The user keeps exactly the scroll position they chose.
                         setTimeout(
                             function () {
                                 map.invalidateSize(true);
