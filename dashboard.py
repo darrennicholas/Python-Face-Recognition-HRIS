@@ -5120,12 +5120,17 @@ def _start_camera():
     st.session_state["camera_last_playing"] = False
     st.session_state["camera_current_playing"] = False
 
-    # WebRTC is already PLAYING in the background. This event only enables the
-    # AI path; frames before START are passed through untouched.
-    _camera_session_active.set()
+    # Do not enable AI here yet. START may be clicked before the browser has
+    # finished WebRTC negotiation. render_camera_section() will enable the AI
+    # path only after ctx.state.playing becomes True.
+    _camera_session_active.clear()
 
 
-@st.fragment
+# Auto-rerun only this camera fragment so WebRTC readiness is polled
+# independently of the full dashboard. This does not alter the existing UI.
+# While the Camera page is mounted, the fragment checks WebRTC state frequently
+# enough that START can wait for PLAYING instead of racing the negotiation.
+@st.fragment(run_every=0.25)
 def render_camera_section():
     """Persistent WebRTC prewarm + AI recognition gate.
 
@@ -5180,11 +5185,22 @@ def render_camera_section():
     # component remounting and was the reason multiple clicks could be needed.
     try:
         # IMPORTANT:
-        # The WebRTC host stays mounted and PLAYING. We only change the CSS
-        # class of the outer shell so START reveals the exact same stream.
+        # The WebRTC host stays mounted and PLAYING whenever the browser has
+        # actually reached the PLAYING state. START never creates a new key.
+        # If START was clicked too early, keep the existing idle overlay in
+        # place until WebRTC reports PLAYING.
+        #
+        # This is the key race-condition fix: requested != ready.
+        # requested means the user asked to start; ready means WebRTC is live.
+        # The same WebRTC component is reused in both states.
+        current_playing = bool(
+            st.session_state.get("camera_current_playing", False)
+        )
+        camera_live_ready = bool(camera_requested and current_playing)
+
         shell_state_class = (
             "camera-prewarm-live"
-            if camera_requested
+            if camera_live_ready
             else "camera-prewarm-idle"
         )
 
@@ -5230,7 +5246,7 @@ def render_camera_section():
 
             # Overlay only covers the already-playing video. It never hides,
             # disables, or remounts the WebRTC component itself.
-            if not camera_requested:
+            if not camera_live_ready:
                 render_html(
                     """
                     <div class="camera-prewarm-overlay">
@@ -5263,6 +5279,8 @@ def render_camera_section():
             st.error(f"Camera error: {exc}")
         return
 
+    # Read the browser/WebRTC state after the component has had a chance to
+    # negotiate. This is the authoritative readiness signal for START.
     current_playing = bool(ctx.state.playing)
     st.session_state["camera_prepared"] = current_playing
 
@@ -5308,9 +5326,20 @@ def render_camera_section():
                     )
 
     st.session_state["camera_current_playing"] = current_playing
-    st.session_state["camera_view_ready"] = bool(
-        current_playing and (camera_requested or frame_ready)
+
+    # START can only expose the video and enable AI after WebRTC is actually
+    # PLAYING. Before that point the existing prewarm placeholder remains in
+    # place, so a user click cannot race the browser negotiation.
+    camera_live_ready = bool(
+        camera_requested and current_playing
     )
+    st.session_state["camera_view_ready"] = camera_live_ready
+
+    if camera_requested and not current_playing:
+        print(
+            "[CAMERA READY] START requested; waiting for WebRTC PLAYING "
+            "without recreating the camera component."
+        )
 
     # ----------------------------------------------------------
     # START / STOP
@@ -5341,9 +5370,14 @@ def render_camera_section():
     # YuNet detection, bounding box, or SFace recognition is executed.
     # START enables the existing recognition path. YuNet is requested
     # asynchronously at START and recognition begins as soon as it is ready.
-    if camera_requested:
+    if camera_live_ready:
+        # WebRTC is now truly ready. Only now do we allow ndarray conversion,
+        # YuNet tracking, bounding boxes, and SFace recognition to run.
         _camera_session_active.set()
     else:
+        # START may already have been clicked, but if WebRTC is still
+        # negotiating we deliberately keep AI disabled. The same component
+        # remains mounted and the fragment will check again automatically.
         _camera_session_active.clear()
         st.session_state["camera_last_playing"] = False
 
