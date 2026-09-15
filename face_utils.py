@@ -2208,7 +2208,11 @@ class FaceRecognizer:
         self.prepare_process_async()
 
     def _prepare_camera_steps(self) -> bool:
-        """Load YuNet on START, then build/restore the face gallery."""
+        """Load the complete live-camera stack and restore/build the gallery.
+
+        This runs in the background during app startup. START is only the UI
+        gate for recognition; it does not need to initialize the heavy models.
+        """
         try:
             # SFace is normally already resident from process preload.
             if not self._load_model():
@@ -2225,7 +2229,8 @@ class FaceRecognizer:
             if not cache_ready:
                 cache_ready = self._load_embedding_cache(signature)
 
-            # YuNet is deliberately the START-time detector initialization.
+            # YuNet is part of the complete process-level preload. It can also be
+    # requested again by START; the loader is guarded against duplicate work.
             self._set_stage("Loading YuNet detector...")
             if not self._load_yunet():
                 return False
@@ -2273,7 +2278,11 @@ class FaceRecognizer:
         )
 
     def prepare_camera_async(self) -> None:
-        """Request START-time YuNet and complete live recognition preparation."""
+        """Ensure the complete live-recognition stack is prepared asynchronously.
+
+        Safe to call from START: if the process-level preload already finished,
+        this returns immediately without rebuilding the models or gallery.
+        """""
         with self._lock:
             self._camera_prepare_requested = True
 
@@ -2300,7 +2309,10 @@ class FaceRecognizer:
 
     # Backwards-compatible API aliases.
     def prepare_all_async(self) -> None:
-        """Start full live-camera ML preparation in the background."""
+        """Start the COMPLETE live-camera ML stack in the background.
+
+        Loads DeepFace/SFace, embedding gallery, and YuNet once per process.
+        """
         self.prepare_camera_async()
 
     def prepare_model_async(self) -> None:
