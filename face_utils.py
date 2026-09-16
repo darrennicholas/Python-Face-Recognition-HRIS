@@ -94,16 +94,16 @@ class FaceRecognizer:
     )
 
     # Detector settings.
-    # Slightly permissive so a face farther from the camera
+    # Slightly permissive so a face farther from the camera_web
     # is not rejected too early.
     YUNET_SCORE_THRESHOLD = 0.45
     YUNET_NMS_THRESHOLD = 0.30
     YUNET_TOP_K = 10
     MAX_FACES = 1
 
-    # Fast live-camera tracking.
-    FAST_DETECT_SCALE = 0.50
-    FAST_FALLBACK_INTERVAL = 6
+    # Fast live-camera_web tracking.
+    FAST_DETECT_SCALE = 1.0
+    FAST_FALLBACK_INTERVAL = 1
 
     # One fallback pass for small/far faces.
     FAR_FACE_UPSCALE = 2.0
@@ -111,8 +111,8 @@ class FaceRecognizer:
     SMALL_FACE_HEIGHT = 60
 
     # Bounding-box smoothing.
-    BOX_SMOOTH_ALPHA = 0.88
-    MAX_MISSED_DETECTIONS = 5
+    BOX_SMOOTH_ALPHA = 0.75
+    MAX_MISSED_DETECTIONS = 0
 
     # Identity smoothing.
     IDENTITY_SWITCH_CONFIRMATIONS = 2
@@ -2187,7 +2187,7 @@ class FaceRecognizer:
             )
 
     def _prepare_full_worker(self) -> None:
-        """Load the complete live-camera recognition stack."""
+        """Load the complete live-camera_web recognition stack."""
         success = False
         try:
             success = self._prepare_camera_steps()
@@ -2208,7 +2208,7 @@ class FaceRecognizer:
         self.prepare_process_async()
 
     def _prepare_camera_steps(self) -> bool:
-        """Load the complete live-camera stack and restore/build the gallery.
+        """Load the complete live-camera_web stack and restore/build the gallery.
 
         This runs in the background during app startup. START is only the UI
         gate for recognition; it does not need to initialize the heavy models.
@@ -2309,7 +2309,7 @@ class FaceRecognizer:
 
     # Backwards-compatible API aliases.
     def prepare_all_async(self) -> None:
-        """Start the COMPLETE live-camera ML stack in the background.
+        """Start the COMPLETE live-camera_web ML stack in the background.
 
         Loads DeepFace/SFace, embedding gallery, and YuNet once per process.
         """
@@ -2737,10 +2737,10 @@ class FaceRecognizer:
         frame: Any,
     ) -> tuple[dict | None, tuple[int, int, int, int] | None]:
         """
-        Fast YuNet-only tracking for every live-camera frame.
+        Responsive YuNet detection for the native browser camera.
 
-        It intentionally does not run SFace. The expensive far-face fallback
-        is sampled periodically, while the normal path runs on a reduced frame.
+        YuNet runs on the current full-resolution AI frame. SFace is never
+        executed here; recognition remains in the background worker.
         """
         if frame is None:
             return None, None
@@ -2752,53 +2752,21 @@ class FaceRecognizer:
             return None, None
 
         if not self.is_detector_ready():
-            return None, self._get_stable_box(frame.shape)
+            return None, None
 
         try:
-            import cv2
-
             self._fast_track_frame += 1
 
-            height, width = frame.shape[:2]
-            scale = self.FAST_DETECT_SCALE
-
-            if scale < 1.0:
-                small = cv2.resize(
-                    frame,
-                    (
-                        max(1, int(round(width * scale))),
-                        max(1, int(round(height * scale))),
-                    ),
-                    interpolation=cv2.INTER_AREA,
-                )
-            else:
-                small = frame
-
-            detections = self._detect_on_image(small)
-
-            # Only sample the full-resolution fallback occasionally.
-            if not detections and (
-                self._fast_track_frame
-                % self.FAST_FALLBACK_INTERVAL
-                == 0
-            ):
-                detections = self._detect_face_best_scale(frame)
-                if detections:
-                    detection = detections[0]
-                    stable = self._smooth_box(
-                        detection,
-                        frame.shape,
-                    )
-                    return detection, stable
+            # Full-resolution detection prevents the 0.50 downscale from
+            # losing faces during movement, side turns, or zoom changes.
+            detections = self._detect_face_best_scale(frame)
 
             if not detections:
-                stable = self._get_stable_box(frame.shape)
-                return None, stable
+                # Never keep a stale box when the current frame has no face.
+                self._reset_tracking_box_only()
+                return None, None
 
-            detection = self._scale_detection_to_frame(
-                detections[0],
-                scale,
-            )
+            detection = detections[0]
 
             stable = self._smooth_box(
                 detection,
@@ -2808,8 +2776,16 @@ class FaceRecognizer:
             return detection, stable
 
         except Exception as exc:
-            print(f"⚠️ Fast face tracking error: {exc}")
-            return None, self._get_stable_box(frame.shape)
+            print(
+                f"⚠️ Responsive face detection error: {exc}"
+            )
+            self._reset_tracking_box_only()
+            return None, None
+
+    def _reset_tracking_box_only(self) -> None:
+        """Clear only the box state and keep recognition identity state."""
+        self._smoothed_box = None
+        self._missed_detections = 0
 
     def recognize_detection(
         self,
@@ -2913,7 +2889,7 @@ class FaceRecognizer:
 
         # IMPORTANT:
         # Never initialize YuNet synchronously inside the video callback.
-        # The camera START lifecycle owns detector preparation. This keeps
+        # The camera_web START lifecycle owns detector preparation. This keeps
         # the browser/video stream responsive even on slower CPUs.
         if not self.is_detector_ready():
             return [], [], []
@@ -3186,8 +3162,8 @@ def start_process_preload() -> None:
     """Start the complete face-model preload once per Python process.
 
     Startup loads DeepFace/SFace, the embedding gallery, and YuNet in the
-    background. The WebRTC webcam prewarm is handled independently by
-    dashboard.py and does not run AI inference before START.
+    background. The browser camera is handled by camera_web.js through
+    camera_server.py; no Streamlit/WebRTC lifecycle is required.
     """
     global _process_preload_started
 
@@ -3206,3 +3182,5 @@ def start_process_preload() -> None:
 def wait_for_process_preload(timeout: float | None = None) -> bool:
     """Block until the process-level face-recognition stack is fully ready."""
     return get_face_recognizer().wait_until_ready(timeout=timeout)
+
+

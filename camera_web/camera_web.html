@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>
+        HR Attendance Camera
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="/camera_web.css"
+    >
+
+</head>
+
+
+<body>
+
+    <div class="camera-wrapper">
+
+        <video
+            id="camera"
+            autoplay
+            playsinline
+            muted
+        ></video>
+
+
+        <canvas
+            id="overlay"
+        ></canvas>
+
+
+        <div
+            id="loading"
+            class="loading"
+        >
+            Starting camera...
+        </div>
+
+    </div>
+
+
+    <div class="camera-status">
+
+        <div>
+            <small>
+                STATUS
+            </small>
+
+            <strong id="status">
+                Starting...
+            </strong>
+        </div>
+
+
+        <div>
+            <small>
+                IDENTITY
+            </small>
+
+            <strong id="identity">
+                Unknown
+            </strong>
+        </div>
+
+
+        <div>
+            <small>
+                SIMILARITY
+            </small>
+
+            <strong id="similarity">
+                0.0%
+            </strong>
+        </div>
+
+    </div>
+
+
+    <script
+        src="/camera_web.js"
+    ></script>
+
+</body>
+
+</html>

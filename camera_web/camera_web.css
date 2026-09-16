@@ -1,0 +1,189 @@
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    min-height: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f4f8f5;
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+}
+
+/* =========================================================
+   CAMERA FRAME
+   ========================================================= */
+
+.camera-wrapper {
+    position: relative;
+
+    width: min(900px, 95vw);
+
+    overflow: hidden;
+
+    background: #000;
+
+    border-radius: 16px;
+
+    box-shadow:
+        0 10px 30px
+        rgba(0, 0, 0, 0.12);
+
+    aspect-ratio: 4 / 3;
+}
+
+
+#camera {
+    position: absolute;
+
+    inset: 0;
+
+    width: 100%;
+    height: 100%;
+
+    display: block;
+
+    /*
+     * IMPORTANT:
+     * No crop.
+     */
+    object-fit: fill;
+
+    background: #000;
+
+    /*
+     * Mirror webcam preview.
+     */
+    transform: scaleX(-1);
+}
+
+
+#overlay {
+    position: absolute;
+
+    inset: 0;
+
+    width: 100%;
+    height: 100%;
+
+    pointer-events: none;
+
+    /*
+     * Canvas must remain unmirrored.
+     */
+    transform: none;
+}
+
+/* =========================================================
+   LOADING
+   ========================================================= */
+
+.loading {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    transition: opacity 0.2s ease;
+}
+
+.loading.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.spinner {
+    width: 34px;
+    height: 34px;
+    border: 3px solid rgba(255, 255, 255, 0.30);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* =========================================================
+   STATUS
+   ========================================================= */
+
+.camera-status {
+    width: min(900px, 95vw);
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    margin-top: 10px;
+    background: #fff;
+    border: 1px solid #dce8df;
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.status-item {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 14px 18px;
+    border-right: 1px solid #e2ebe4;
+}
+
+.status-item:last-child {
+    border-right: none;
+}
+
+.label {
+    color: #849087;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+.status-item strong {
+    color: #245a34;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+/* =========================================================
+   RESPONSIVE
+   ========================================================= */
+
+@media (max-width: 650px) {
+    body {
+        padding: 12px;
+    }
+
+    .camera-status {
+        grid-template-columns: 1fr;
+    }
+
+    .status-item {
+        border-right: none;
+        border-bottom: 1px solid #e2ebe4;
+    }
+
+    .status-item:last-child {
+        border-bottom: none;
+    }
+}
