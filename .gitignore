@@ -32,6 +32,9 @@ face_recognition_result.json
 .recognition_result.json
 *.tmp
 
+# DeepFace / Fasnet model weights
+*.pth
+
 # =========================
 # Streamlit Secrets
 # =========================
