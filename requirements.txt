@@ -1,5 +1,6 @@
 # Web / Server
 websockets>=16.0,<17.0
+python-dotenv>=1.2,<2.0
 
 # Computer Vision
 opencv-python>=4.10,<5.0

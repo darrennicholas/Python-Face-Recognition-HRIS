@@ -29,10 +29,19 @@ hr-attendance-system/
 ## Requirements.txt
 
 ```txt
+# Web / Server
 websockets>=16.0,<17.0
+python-dotenv>=1.2,<2.0
+
+# Computer Vision
 opencv-python>=4.10,<5.0
 numpy>=1.26,<2.1
 Pillow>=10.0,<12.0
+
+# Face Recognition / Deep Learning
+deepface>=0.0.100,<0.1
+tensorflow>=2.15,<2.22
+torch==2.14.0
 ```
 
 ## Setup
@@ -68,7 +77,7 @@ python -m pip install -r requirements.txt
 
 ## Model AI
 
-Simpan model YuNet dan SFace di:
+Simpan model YuNet dan ArcFace di:
 
 ```text
 models/
@@ -133,7 +142,7 @@ camera_server.py
   ↓
 YuNet → Face Detection
   ↓
-SFace → Face Recognition
+ArcFace → Face Recognition
   ↓
 Hasil Recognition
   ↓
@@ -152,7 +161,7 @@ Browser menangani webcam dan tampilan bounding box, sedangkan Python menangani f
 - Gunakan URL:
 
 ```text
-http://127.0.0.1:8766/camera_web.html
+http://127.0.0.1:8766/camera_web
 ```
 
 ### Wajah tidak terdeteksi
@@ -164,7 +173,7 @@ http://127.0.0.1:8766/camera_web.html
 
 ### Wajah tidak dikenali
 
-- Pastikan model SFace tersedia.
+- Pastikan model ArcFace tersedia.
 - Pastikan foto wajah ada di `known_faces/`.
 - Pastikan foto referensi jelas.
 - Periksa konfigurasi recognition di `face_utils.py`.

@@ -10,6 +10,8 @@ import ssl
 import threading
 import time
 import uuid
+from email.parser import BytesParser
+from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -38,6 +40,24 @@ HOST = os.getenv("HR_CAMERA_BIND_HOST", "127.0.0.1")
 HTTP_PORT = int(os.getenv("HR_CAMERA_HTTP_PORT", "8766"))
 WS_PORT = int(os.getenv("HR_CAMERA_WS_PORT", "8765"))
 
+# Laravel -> Python face registration API.
+# This is a server-to-server HTTP endpoint only; it does NOT create a
+# separate Python UI.
+FACE_REGISTRATION_PATH = "/register-face"
+FACE_REGISTRATION_STATUS_PATH = "/face-registration-status"
+FACE_REGISTRATION_MAX_IMAGE_BYTES = int(
+    os.getenv("FACE_REGISTRATION_MAX_IMAGE_BYTES", str(512 * 1024))
+)
+FACE_REGISTRATION_MAX_REQUEST_BYTES = int(
+    os.getenv(
+        "FACE_REGISTRATION_MAX_REQUEST_BYTES",
+        str((5 * FACE_REGISTRATION_MAX_IMAGE_BYTES) + (1024 * 1024)),
+    )
+)
+FACE_REGISTRATION_JPEG_QUALITY = int(
+    os.getenv("FACE_REGISTRATION_JPEG_QUALITY", "95")
+)
+
 CAMERA_DIR = Path(__file__).resolve().parent / "camera_web"
 # Legacy local result file kept for compatibility with older callers.
 # The current attendance evidence flow does NOT use this JSON file.
@@ -46,13 +66,13 @@ RESULT_WRITE_LOCK = threading.RLock()
 
 # YuNet runs on every current frame. SFace is throttled for CPU usage.
 FRAME_INTERVAL = 1.0 / 25.0
-RECOGNITION_INTERVAL = 0.30
+RECOGNITION_INTERVAL = 0.08
 RECOGNITION_STALE_AFTER = 0.80
 
-# Temporal confirmation. The same HRIS + camera identity match must be
-# observed repeatedly before saving attendance.
-CONFIRMATION_WINDOW = 5
-CONFIRMATION_REQUIRED = 3
+# One-shot attendance confirmation. The first valid HRIS + face match
+# is enough to start the evidence upload and browser redirect.
+CONFIRMATION_WINDOW = 1
+CONFIRMATION_REQUIRED = 1
 
 # Kept for compatibility with app.py; recognition thresholds are owned by
 # face_utils.py and are calibrated from target + impostor gallery evidence.
@@ -79,7 +99,7 @@ HRIS_FACE_CA_BUNDLE = os.getenv(
     "HRIS_FACE_CA_BUNDLE",
     "",
 ).strip()
-SSO_MAX_LEASE_SECONDS = 30.0
+SSO_MAX_LEASE_SECONDS = 20.0
 
 
 # ============================================================
@@ -107,9 +127,12 @@ _result_saved = False
 _result_file_path: str | None = None
 _result_lock = threading.Lock()
 
-# Set as soon as the 3/3-confirmed attendance upload is launched.
+# Set as soon as the one-shot confirmed attendance upload is launched.
 # This prevents the browser redirect from racing the upload startup.
 _attendance_upload_started = False
+# True after the first full face + HRIS match is accepted for this session.
+# Recognition is terminal after this flag becomes True.
+_attendance_match_locked = False
 
 _recognition_worker_started = False
 _recognition_event = threading.Event()
@@ -133,6 +156,13 @@ _servers_started = False
 _servers_lock = threading.Lock()
 _http_server: ThreadingHTTPServer | None = None
 _ws_loop = None
+
+# Prevent concurrent registration requests from choosing the same file index.
+FACE_REGISTRATION_LOCK = threading.Lock()
+
+
+class FaceRegistrationLockedError(ValueError):
+    """Raised when an employee already has a registered face dataset."""
 
 
 # ============================================================
@@ -353,6 +383,7 @@ def end_session_if_active(session_id: str) -> bool:
 def reset_result_state(remove_file: bool = False) -> None:
     clear_auth_lease()
     global _result_saved, _attendance_confirmed, _attendance_upload_started
+    global _attendance_match_locked
     global _attendance_confirmed_name, _attendance_confirmed_similarity
     global _last_name, _last_candidate, _last_similarity
     global _last_face_confident, _last_recognition_time
@@ -364,6 +395,7 @@ def reset_result_state(remove_file: bool = False) -> None:
         _result_saved = False
         _result_file_path = None
         _attendance_upload_started = False
+        _attendance_match_locked = False
         with _state_lock:
             _confirmation_history.clear()
             _attendance_confirmed = False
@@ -397,36 +429,33 @@ def update_attendance_confirmation(
     hris_match: bool,
 ) -> tuple[bool, str, float, int]:
     """
-    Count only frames where the face identity shown by the camera matches
-    the currently authenticated HRIS user.
+    Confirm attendance in ONE-SHOT mode.
 
-    IMPORTANT:
-    - The camera candidate is already produced by face_utils using the
-      full-gallery target/candidate gates.
-    - Confirmation is intentionally based on the final displayed identity
-      matching the current HRIS identity.
-    - Three consecutive valid matches are required.
+    The first valid frame where the strict face_utils identity equals the
+    authenticated HRIS user is enough to confirm attendance. The helper keeps
+    the existing history structure for compatibility, but the production
+    requirement is exactly one valid match.
     """
-    global _attendance_confirmed, _attendance_confirmed_name
+    global _attendance_confirmed, _attendance_confirmed_name, _attendance_match_locked
     global _attendance_confirmed_similarity
 
     clean_name = format_display_name(name)
 
     with _state_lock:
         if hris_match and clean_name != "Unknown":
-            # A valid match advances the 3/3 streak.
+            # A valid match confirms attendance immediately in one-shot mode.
             _confirmation_history.append(
                 (clean_name, float(similarity), time.monotonic())
             )
 
-            # Keep the streak strictly consecutive for one identity.
+            # Keep the existing history shape for compatibility; max length is 1.
             if any(item[0] != clean_name for item in _confirmation_history):
                 _confirmation_history.clear()
                 _confirmation_history.append(
                     (clean_name, float(similarity), time.monotonic())
                 )
         else:
-            # Any non-match breaks the consecutive 3/3 streak.
+            # Any non-match clears the one-shot confirmation state.
             _confirmation_history.clear()
 
         valid = [
@@ -460,6 +489,28 @@ def update_attendance_confirmation(
         )
 
 
+
+
+def _attendance_terminal_state() -> tuple[bool, bool, str, float, str, str]:
+    """Return terminal one-shot attendance state without running recognition."""
+    with _result_lock:
+        saved = bool(_result_saved)
+        upload_started = bool(_attendance_upload_started)
+
+    with _state_lock:
+        locked = bool(_attendance_match_locked)
+        name = format_display_name(_attendance_confirmed_name)
+        similarity = float(_attendance_confirmed_similarity)
+
+    terminal = locked or upload_started or saved
+    if saved:
+        status = "attendance_saved"
+    elif terminal:
+        status = "attendance_processing"
+    else:
+        status = ""
+
+    return terminal, saved, name, similarity, HRIS_RETURN_URL, status
 
 def _load_result_history() -> list[dict]:
     """Load the persistent JSON history from face_recognition_result.json."""
@@ -566,7 +617,7 @@ def post_attendance_evidence(
     allow_background_completion: bool = False,
 ) -> bool:
     """
-    Upload exactly one clean attendance evidence image after 3/3 confirmation.
+    Upload exactly one clean attendance evidence image after one-shot confirmation.
 
     The saved evidence keeps the COMPLETE original camera frame at its native
     resolution. It does not crop, resize, blur, sharpen, draw a bounding box,
@@ -605,7 +656,7 @@ def post_attendance_evidence(
             if session_id is not None and _active_session_id != session_id:
                 return False
 
-    # When 3/3 has already been confirmed, keep a snapshot of the authenticated
+    # When one-shot attendance has already been confirmed, keep a snapshot of the authenticated
     # HRIS user/result token so the JPEG upload can finish even if the browser
     # redirects and closes the WebSocket immediately afterward.
     user = (
@@ -835,7 +886,7 @@ def save_result(
     session_id: str | None = None,
 ) -> bool:
     """
-    Persist exactly once after the 3/3 identity + HRIS confirmation.
+    Persist exactly once after the one-shot identity + HRIS confirmation.
 
     IMPORTANT:
     - The output filename is ALWAYS exactly ``face_recognition_result.json``.
@@ -977,7 +1028,7 @@ def _start_recognition_worker() -> None:
 
 def recognition_worker() -> None:
     global _pending_frame, _pending_detection, _pending_generation
-    global _attendance_upload_started
+    global _attendance_upload_started, _attendance_match_locked
     global _last_name, _last_candidate, _last_similarity
     global _last_face_confident, _last_recognition_time
     global _last_quality_ok, _last_quality_score
@@ -1007,6 +1058,18 @@ def recognition_worker() -> None:
                     continue
 
                 if not auth_lease_valid():
+                    continue
+
+                # ONE-SHOT TERMINAL GATE: after the first accepted match,
+                # never run another ArcFace/PAD recognition job.
+                with _result_lock:
+                    terminal_match = bool(
+                        _attendance_upload_started or _result_saved
+                    )
+                with _state_lock:
+                    terminal_match = terminal_match or bool(_attendance_match_locked)
+
+                if terminal_match:
                     continue
 
                 recognizer = get_face_recognizer()
@@ -1153,8 +1216,22 @@ def recognition_worker() -> None:
                             launch_upload = False
 
                     if launch_upload:
+                        # Lock recognition BEFORE starting the upload.
+                        # From this point onward only the Laravel save/status
+                        # path may continue; no more ArcFace/PAD calls.
+                        with _state_lock:
+                            _attendance_match_locked = True
+                            _attendance_confirmed = True
+                            _attendance_confirmed_name = attendance_name
+                            _attendance_confirmed_similarity = float(attendance_similarity)
+
+                        with _recognition_lock:
+                            _pending_frame = None
+                            _pending_detection = None
+                            _pending_session_id = None
+
                         print(
-                            "🟢 [FACE] 3/3 HRIS + FACE MATCH CONFIRMED.",
+                            "🟢 [FACE] ONE-SHOT HRIS + FACE MATCH CONFIRMED — LOCKED.",
                             flush=True,
                         )
                         print(
@@ -1181,8 +1258,8 @@ def recognition_worker() -> None:
                         ).start()
 
                         print(
-                            "➡️ [ATTENDANCE] Browser may redirect immediately "
-                            "after receiving attendance_confirmed=true.",
+                            "⏳ [ATTENDANCE] Recognition is locked. "
+                            "Browser will redirect only after Laravel returns result_saved=true.",
                             flush=True,
                         )
                 else:
@@ -1210,6 +1287,13 @@ def queue_recognition(frame: np.ndarray, detection: dict) -> None:
 
     if not auth_lease_valid():
         return
+
+    with _result_lock:
+        if _attendance_upload_started or _result_saved:
+            return
+    with _state_lock:
+        if _attendance_match_locked:
+            return
 
     now = time.monotonic()
     if now - _last_queue_time < RECOGNITION_INTERVAL:
@@ -1319,6 +1403,41 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
             "recognition_ready": recognizer.is_ready(),
         }
 
+    # ONE-SHOT TERMINAL STATE: do not run YuNet/ArcFace/PAD again after a
+    # valid face/HRIS match. Keep sending only a lightweight status so the
+    # browser can wait for Laravel to finish saving evidence/attendance.
+    terminal_locked, terminal_saved, terminal_name, terminal_similarity, return_url, terminal_status = _attendance_terminal_state()
+    if terminal_locked:
+        hris_match_terminal = bool(
+            terminal_name != "Unknown"
+            and normalize_person_name(terminal_name) == normalize_person_name(target_identity)
+        )
+        return {
+            "name": terminal_name if terminal_name != "Unknown" else target_identity,
+            "candidate": terminal_name if terminal_name != "Unknown" else target_identity,
+            "similarity": float(terminal_similarity),
+            "face_confident": True,
+            "hris_match": hris_match_terminal,
+            "recognition_fresh": False,
+            "attendance_confirmed": bool(terminal_saved),
+            "confirmation_count": CONFIRMATION_REQUIRED,
+            "confirmation_required": CONFIRMATION_REQUIRED,
+            "attendance_mode": "one-shot-terminal",
+            "result_saved": bool(terminal_saved),
+            "return_url": return_url,
+            "target_identity": target_identity,
+            "box": None,
+            "raw_box": None,
+            "stable_box": None,
+            "width": int(frame.shape[1]),
+            "height": int(frame.shape[0]),
+            "status": terminal_status,
+            "detector_ready": recognizer.is_detector_ready(),
+            "model_ready": recognizer.is_model_ready(),
+            "embeddings_ready": recognizer.is_embeddings_ready(),
+            "recognition_ready": recognizer.is_ready(),
+        }
+
     if not recognizer.is_detector_ready():
         print_ml_status("WAIT")
         result_saved, return_url = _session_result_meta()
@@ -1379,6 +1498,9 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
 
     queue_recognition(frame, detection)
 
+    with _result_lock:
+        result_saved_now = bool(_result_saved)
+
     with _state_lock:
         age = time.monotonic() - _last_recognition_time
         fresh = age <= RECOGNITION_STALE_AFTER
@@ -1397,6 +1519,7 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
         confirmed = bool(
             fresh
             and _attendance_confirmed
+            and result_saved_now
             and candidate_name != "Unknown"
             and normalize_person_name(candidate_name)
             == normalize_person_name(_attendance_confirmed_name)
@@ -1434,6 +1557,7 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
         "attendance_confirmed": bool(confirmed),
         "confirmation_count": int(confirmation_count),
         "confirmation_required": CONFIRMATION_REQUIRED,
+        "attendance_mode": "one-shot",
         "result_saved": result_saved,
         "return_url": return_url,
         "target_identity": target_identity,
@@ -1464,6 +1588,530 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
         "model_ready": recognizer.is_model_ready(),
         "embeddings_ready": recognizer.is_embeddings_ready(),
         "recognition_ready": recognizer.is_ready(),
+    }
+
+
+# ============================================================
+# FACE REGISTRATION HTTP HELPERS
+# ============================================================
+def _send_json_response(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    payload: dict,
+) -> None:
+    data = json.dumps(
+        payload,
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    handler.send_response(status_code)
+    handler.send_header(
+        "Content-Type",
+        "application/json; charset=utf-8",
+    )
+    handler.send_header(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate, max-age=0",
+    )
+    handler.send_header(
+        "Pragma",
+        "no-cache",
+    )
+    handler.send_header(
+        "Expires",
+        "0",
+    )
+    handler.send_header(
+        "Content-Length",
+        str(len(data)),
+    )
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _sanitize_registration_name(value: str) -> str:
+    value = str(value or "").strip()
+
+    value = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        value,
+    )
+
+    value = value.strip("_")
+
+    return value or "Unknown"
+
+
+def _first_name(value: str) -> str:
+    value = str(value or "").strip()
+
+    if not value:
+        return "Unknown"
+
+    return value.split()[0]
+
+
+def _parse_registration_multipart(
+    content_type: str,
+    body: bytes,
+) -> tuple[dict[str, str], list[dict]]:
+    """
+    Parse Laravel's multipart/form-data request.
+
+    Expected scalar fields:
+      - employee_name
+      - employee_no
+      - user_uid
+
+    Expected files:
+      - photos[] x 5
+    """
+    header_blob = (
+        f"Content-Type: {content_type}\r\n"
+        "MIME-Version: 1.0\r\n"
+        "\r\n"
+    ).encode("utf-8")
+
+    message = BytesParser(
+        policy=default,
+    ).parsebytes(
+        header_blob + body
+    )
+
+    if not message.is_multipart():
+        raise ValueError(
+            "Request bukan multipart/form-data."
+        )
+
+    fields: dict[str, str] = {}
+    files: list[dict] = []
+
+    for part in message.iter_parts():
+        disposition = part.get(
+            "Content-Disposition",
+            "",
+        )
+
+        name_match = re.search(
+            r'name="([^"]+)"',
+            disposition,
+        )
+
+        if not name_match:
+            continue
+
+        field_name = name_match.group(1)
+        filename = part.get_filename()
+        payload = (
+            part.get_payload(
+                decode=True
+            )
+            or b""
+        )
+
+        if filename:
+            files.append(
+                {
+                    "field": field_name,
+                    "filename": filename,
+                    "content": payload,
+                }
+            )
+        else:
+            fields[field_name] = payload.decode(
+                "utf-8",
+                errors="replace",
+            )
+
+    return fields, files
+
+
+def _get_next_registration_index(
+    folder: Path,
+    base_name: str,
+) -> int:
+    """
+    Find the next number for one employee.
+
+    Example:
+        Darren_222222_1.jpg
+        Darren_222222_2.jpg
+        Darren_222222_5.jpg
+
+    returns 6.
+    """
+    pattern = re.compile(
+        rf"^{re.escape(base_name)}_(\d+)\.jpg$",
+        re.IGNORECASE,
+    )
+
+    highest = 0
+
+    if not folder.exists():
+        return 1
+
+    for path in folder.iterdir():
+        if not path.is_file():
+            continue
+
+        match = pattern.match(
+            path.name
+        )
+
+        if not match:
+            continue
+
+        try:
+            number = int(
+                match.group(1)
+            )
+        except ValueError:
+            continue
+
+        highest = max(
+            highest,
+            number,
+        )
+
+    return highest + 1
+
+
+def _save_registration_images(
+    files: list[dict],
+    target_folder: Path,
+    base_name: str,
+) -> tuple[list[str], int]:
+    """
+    Decode and save exactly five uploaded images as JPEG files.
+
+    Returns:
+        (saved filenames, first assigned index)
+    """
+    start_index = _get_next_registration_index(
+        target_folder,
+        base_name,
+    )
+
+    saved_files: list[str] = []
+
+    try:
+        for offset, item in enumerate(files):
+            image_bytes = item["content"]
+
+            if not image_bytes:
+                raise ValueError(
+                    f"Foto ke-{offset + 1} kosong."
+                )
+
+            if len(image_bytes) > FACE_REGISTRATION_MAX_IMAGE_BYTES:
+                raise ValueError(
+                    f"Foto ke-{offset + 1} melebihi "
+                    f"{FACE_REGISTRATION_MAX_IMAGE_BYTES // 1024} KB."
+                )
+
+            encoded = np.frombuffer(
+                image_bytes,
+                dtype=np.uint8,
+            )
+
+            image = cv2.imdecode(
+                encoded,
+                cv2.IMREAD_COLOR,
+            )
+
+            if image is None:
+                raise ValueError(
+                    f"Foto ke-{offset + 1} bukan gambar yang valid."
+                )
+
+            if image.size == 0:
+                raise ValueError(
+                    f"Foto ke-{offset + 1} kosong setelah decode."
+                )
+
+            number = start_index + offset
+            filename = (
+                f"{base_name}_{number}.jpg"
+            )
+
+            output_path = (
+                target_folder /
+                filename
+            )
+
+            ok = cv2.imwrite(
+                str(output_path),
+                image,
+                [
+                    cv2.IMWRITE_JPEG_QUALITY,
+                    FACE_REGISTRATION_JPEG_QUALITY,
+                ],
+            )
+
+            if not ok:
+                raise RuntimeError(
+                    f"Gagal menyimpan {filename}."
+                )
+
+            saved_files.append(
+                filename
+            )
+
+        return saved_files, start_index
+
+    except Exception:
+        # Roll back only files created by this request.
+        for filename in saved_files:
+            try:
+                (
+                    target_folder /
+                    filename
+                ).unlink(
+                    missing_ok=True
+                )
+            except Exception:
+                pass
+
+        raise
+
+
+def _register_face_images(
+    employee_name: str,
+    employee_no: str,
+    user_uid: str,
+    files: list[dict],
+) -> dict:
+    """
+    Save five images into:
+        known_faces/<FirstName>/<FirstName>_<EmployeeNo>_<N>.jpg
+
+    Then refresh the FaceRecognizer gallery.
+    """
+    if not employee_name:
+        raise ValueError(
+            "employee_name tidak dikirim oleh Laravel."
+        )
+
+    if not employee_no:
+        raise ValueError(
+            "employee_no tidak dikirim oleh Laravel."
+        )
+
+    if not user_uid:
+        raise ValueError(
+            "user_uid tidak dikirim oleh Laravel."
+        )
+
+    image_files = [
+        item
+        for item in files
+        if item.get("field") == "photos[]"
+    ]
+
+    if len(image_files) != 5:
+        raise ValueError(
+            f"Python menerima {len(image_files)} foto; "
+            "harus tepat 5 foto."
+        )
+
+    first_name = _sanitize_registration_name(
+        _first_name(
+            employee_name
+        )
+    )
+
+    safe_employee_no = _sanitize_registration_name(
+        employee_no
+    )
+
+    base_name = (
+        f"{first_name}_{safe_employee_no}"
+    )
+
+    recognizer = get_face_recognizer()
+    known_faces_dir = recognizer.known_faces_dir
+
+    target_folder = (
+        known_faces_dir /
+        first_name
+    )
+
+    target_folder.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with FACE_REGISTRATION_LOCK:
+        registration_lock_file = (
+            target_folder /
+            f".{base_name}.registered"
+        )
+
+        existing_files = sorted(
+            target_folder.glob(
+                f"{base_name}_*.jpg"
+            )
+        )
+
+        if (
+            registration_lock_file.exists()
+            or existing_files
+        ):
+            raise FaceRegistrationLockedError(
+                "Wajah user sudah terdaftar. "
+                "Registrasi wajah hanya dapat dilakukan satu kali."
+            )
+
+        saved_files, start_index = (
+            _save_registration_images(
+                image_files,
+                target_folder,
+                base_name,
+            )
+        )
+
+        try:
+            print(
+                "📸 [REGISTRATION] "
+                f"Saved {len(saved_files)} images.",
+                flush=True,
+            )
+            print(
+                f"   User        : {employee_name}",
+                flush=True,
+            )
+            print(
+                f"   Employee No : {employee_no}",
+                flush=True,
+            )
+            print(
+                f"   Folder      : {target_folder}",
+                flush=True,
+            )
+            print(
+                f"   Files       : {', '.join(saved_files)}",
+                flush=True,
+            )
+
+            # face_utils.py already exposes reload(), which re-indexes
+            # known_faces and rebuilds the gallery asynchronously.
+            print(
+                "🔄 [REGISTRATION] Reloading face gallery...",
+                flush=True,
+            )
+            gallery_count = recognizer.reload()
+
+            # Give the new gallery a chance to finish preparation.
+            gallery_ready = recognizer.wait_until_ready(
+                timeout=120.0
+            )
+
+            if not gallery_ready:
+                raise RuntimeError(
+                    "Gallery reload belum READY setelah registration."
+                )
+
+            print(
+                "✅ [REGISTRATION] "
+                f"Gallery READY | embeddings={gallery_count}",
+                flush=True,
+            )
+
+            # Filesystem lock: this registration can never be edited
+            # or registered again through this service.
+            registration_lock_file.write_text(
+                "registered\n",
+                encoding="utf-8",
+            )
+
+            return {
+                "success": True,
+                "user_uid": user_uid,
+                "folder": first_name,
+                "path": str(target_folder),
+                "files": saved_files,
+                "start_index": start_index,
+                "end_index": start_index + 4,
+                "gallery_count": gallery_count,
+            }
+
+        except Exception:
+            # Delete this request's images if gallery preparation failed.
+            for filename in saved_files:
+                try:
+                    (
+                        target_folder /
+                        filename
+                    ).unlink(
+                        missing_ok=True
+                    )
+                except Exception:
+                    pass
+
+            raise
+
+
+def _get_face_registration_status(
+    employee_name: str,
+    employee_no: str,
+) -> dict:
+    """
+    Check registration state using the Python filesystem only.
+    """
+    if not employee_name:
+        raise ValueError(
+            "employee_name tidak dikirim oleh Laravel."
+        )
+
+    if not employee_no:
+        raise ValueError(
+            "employee_no tidak dikirim oleh Laravel."
+        )
+
+    first_name = _sanitize_registration_name(
+        _first_name(employee_name)
+    )
+
+    safe_employee_no = _sanitize_registration_name(
+        employee_no
+    )
+
+    base_name = (
+        f"{first_name}_{safe_employee_no}"
+    )
+
+    recognizer = get_face_recognizer()
+
+    target_folder = (
+        recognizer.known_faces_dir /
+        first_name
+    )
+
+    registration_lock_file = (
+        target_folder /
+        f".{base_name}.registered"
+    )
+
+    existing_files = sorted(
+        target_folder.glob(
+            f"{base_name}_*.jpg"
+        )
+    )
+
+    registered = bool(
+        registration_lock_file.exists()
+        or existing_files
+    )
+
+    return {
+        "success": True,
+        "registered": registered,
+        "photo_count": len(existing_files),
+        "files": [
+            file.name
+            for file in existing_files
+        ],
     }
 
 
@@ -1517,9 +2165,367 @@ class CameraHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+
+        if path == FACE_REGISTRATION_STATUS_PATH:
+            try:
+                expected_token = str(
+                    FACE_RECOGNITION_TOKEN or ""
+                ).strip()
+
+                authorization = str(
+                    self.headers.get(
+                        "Authorization",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                provided_token = ""
+
+                token_match = re.match(
+                    r"^Bearer\s+(.+)$",
+                    authorization,
+                    re.IGNORECASE,
+                )
+
+                if token_match:
+                    provided_token = (
+                        token_match.group(1).strip()
+                    )
+
+                if (
+                    not expected_token
+                    or not provided_token
+                    or provided_token != expected_token
+                ):
+                    _send_json_response(
+                        self,
+                        401,
+                        {
+                            "success": False,
+                            "message": "Unauthorized.",
+                        },
+                    )
+                    return
+
+                employee_name = str(
+                    self.headers.get(
+                        "X-Employee-Name",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                employee_no = str(
+                    self.headers.get(
+                        "X-Employee-No",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                result = _get_face_registration_status(
+                    employee_name=employee_name,
+                    employee_no=employee_no,
+                )
+
+                _send_json_response(
+                    self,
+                    200,
+                    result,
+                )
+                return
+
+            except ValueError as exc:
+                _send_json_response(
+                    self,
+                    422,
+                    {
+                        "success": False,
+                        "message": str(exc),
+                    },
+                )
+                return
+
+            except Exception as exc:
+                print(
+                    f"❌ [REGISTRATION STATUS] Error: {exc}",
+                    flush=True,
+                )
+
+                _send_json_response(
+                    self,
+                    500,
+                    {
+                        "success": False,
+                        "message":
+                            "Python gagal membaca status registration.",
+                    },
+                )
+                return
+
         self.send_error(404)
 
+    def do_POST(self) -> None:
+        """
+        Laravel -> Python face registration endpoint.
+
+        POST /register-face
+        Content-Type: multipart/form-data
+
+        Fields:
+          employee_name
+          employee_no
+          user_uid
+
+        Files:
+          photos[] x 5
+        """
+        path = self.path.split("?", 1)[0]
+
+        if path != FACE_REGISTRATION_PATH:
+            _send_json_response(
+                self,
+                404,
+                {
+                    "success": False,
+                    "message": "Endpoint not found.",
+                },
+            )
+            return
+
+        try:
+            # ----------------------------------------------------
+            # 1. Server-to-server token
+            # ----------------------------------------------------
+            expected_token = str(
+                FACE_RECOGNITION_TOKEN or ""
+            ).strip()
+
+            authorization = str(
+                self.headers.get(
+                    "Authorization",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            provided_token = ""
+            token_match = re.match(
+                r"^Bearer\s+(.+)$",
+                authorization,
+                re.IGNORECASE,
+            )
+
+            if token_match:
+                provided_token = (
+                    token_match.group(1).strip()
+                )
+
+            if not expected_token:
+                _send_json_response(
+                    self,
+                    500,
+                    {
+                        "success": False,
+                        "message":
+                            "FACE_RECOGNITION_TOKEN belum dikonfigurasi di Python.",
+                    },
+                )
+                return
+
+            if (
+                not provided_token
+                or provided_token != expected_token
+            ):
+                _send_json_response(
+                    self,
+                    401,
+                    {
+                        "success": False,
+                        "message": "Unauthorized.",
+                    },
+                )
+                return
+
+            # ----------------------------------------------------
+            # 2. Multipart request
+            # ----------------------------------------------------
+            content_type = str(
+                self.headers.get(
+                    "Content-Type",
+                    "",
+                )
+                or ""
+            )
+
+            if not content_type.lower().startswith(
+                "multipart/form-data"
+            ):
+                _send_json_response(
+                    self,
+                    400,
+                    {
+                        "success": False,
+                        "message":
+                            "Content-Type harus multipart/form-data.",
+                    },
+                )
+                return
+
+            try:
+                content_length = int(
+                    self.headers.get(
+                        "Content-Length",
+                        "0",
+                    )
+                )
+            except ValueError:
+                _send_json_response(
+                    self,
+                    400,
+                    {
+                        "success": False,
+                        "message":
+                            "Content-Length tidak valid.",
+                    },
+                )
+                return
+
+            if content_length <= 0:
+                _send_json_response(
+                    self,
+                    400,
+                    {
+                        "success": False,
+                        "message":
+                            "Request body kosong.",
+                    },
+                )
+                return
+
+            if (
+                content_length >
+                FACE_REGISTRATION_MAX_REQUEST_BYTES
+            ):
+                _send_json_response(
+                    self,
+                    413,
+                    {
+                        "success": False,
+                        "message":
+                            "Ukuran request registration terlalu besar.",
+                    },
+                )
+                return
+
+            body = self.rfile.read(
+                content_length
+            )
+
+            fields, files = (
+                _parse_registration_multipart(
+                    content_type,
+                    body,
+                )
+            )
+
+            # ----------------------------------------------------
+            # 3. Identity supplied by Laravel
+            # ----------------------------------------------------
+            employee_name = str(
+                fields.get(
+                    "employee_name",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            employee_no = str(
+                fields.get(
+                    "employee_no",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            user_uid = str(
+                fields.get(
+                    "user_uid",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            # Never trust browser-supplied identity.
+            # These values are expected to originate from Laravel's
+            # authenticated user record.
+
+            # ----------------------------------------------------
+            # 4. Save + reload
+            # ----------------------------------------------------
+            result = _register_face_images(
+                employee_name=employee_name,
+                employee_no=employee_no,
+                user_uid=user_uid,
+                files=files,
+            )
+
+            _send_json_response(
+                self,
+                200,
+                result,
+            )
+
+        except FaceRegistrationLockedError as exc:
+            print(
+                f"🔒 [REGISTRATION] Locked: {exc}",
+                flush=True,
+            )
+
+            _send_json_response(
+                self,
+                409,
+                {
+                    "success": False,
+                    "message": str(exc),
+                },
+            )
+
+        except ValueError as exc:
+            print(
+                f"⚠️ [REGISTRATION] Validation error: {exc}",
+                flush=True,
+            )
+
+            _send_json_response(
+                self,
+                422,
+                {
+                    "success": False,
+                    "message": str(exc),
+                },
+            )
+
+        except Exception as exc:
+            print(
+                f"❌ [REGISTRATION] Error: {exc}",
+                flush=True,
+            )
+
+            _send_json_response(
+                self,
+                500,
+                {
+                    "success": False,
+                    "message":
+                        "Python gagal menyimpan dataset wajah.",
+                },
+            )
+
+
     def log_message(self, fmt, *args):
+        # Suppress default BaseHTTPRequestHandler request logging.
         return
 
 
@@ -1933,6 +2939,8 @@ __all__ = [
     "set_hris_user",
     "get_hris_user",
     "clear_hris_user",
+    "CameraHandler",
 ]
+
 
 

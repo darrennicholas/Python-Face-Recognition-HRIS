@@ -24,7 +24,9 @@
 
 <body>
 
-    <div class="camera-wrapper">
+    <main class="camera-page">
+
+        <div class="camera-wrapper">
 
         <video
             id="camera"
@@ -46,44 +48,49 @@
             Starting camera...
         </div>
 
-    </div>
+        </div>
 
 
-    <div class="camera-status">
+        <section
+            class="camera-status"
+            aria-label="Camera recognition status"
+        >
 
-        <div>
-            <small>
+            <div class="status-item">
+            <small class="label">
                 STATUS
             </small>
 
             <strong id="status">
                 Starting...
             </strong>
-        </div>
+            </div>
 
 
-        <div>
-            <small>
+            <div class="status-item">
+            <small class="label">
                 IDENTITY
             </small>
 
             <strong id="identity">
                 Unknown
             </strong>
-        </div>
+            </div>
 
 
-        <div>
-            <small>
+            <div class="status-item">
+            <small class="label">
                 SIMILARITY
             </small>
 
             <strong id="similarity">
                 0.0%
             </strong>
-        </div>
+            </div>
 
-    </div>
+        </section>
+
+    </main>
 
 
     <script

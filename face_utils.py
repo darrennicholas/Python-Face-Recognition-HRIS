@@ -18,41 +18,42 @@ class FaceRecognizer:
 
     Design:
         YuNet detection
-            -> frontal-pose gate
-            -> passive anti-spoof / PAD
             -> 5-point frontal alignment (112x112)
+            -> quality gate
             -> DeepFace ArcFace embedding
             -> cosine similarity against target + competing gallery samples
             -> target top-3 agreement + best-similarity + identity margin
+            -> passive frontal-pose gate
+            -> passive anti-spoof / PAD
             -> TARGET or Unknown
 
     Identity recognition remains similarity-only and keeps the existing
-    ArcFace/gallery decision logic unchanged. A separate temporal liveness
-    gate is added before identity acceptance. The liveness gate uses only
-    YuNet's existing five facial landmarks and face-box geometry over time;
-    it does not alter ArcFace embeddings, gallery thresholds, top-3 logic,
-    or identity-margin logic.
+    ArcFace/gallery decision logic. A legacy temporal liveness implementation
+    remains available for compatibility, but production uses passive Fasnet
+    anti-spoofing instead; no head movement is required.
 
-    The liveness gate is designed to reject a static photo/screenshot by
-    requiring a short natural head-motion sequence and a return toward the
-    starting position.
-
-    The identity decision itself does not use:
+    The production identity decision itself does not use:
         - pose buckets
         - prototype embeddings
         - temporal embedding averaging
         - learned classifiers
         - non-face behavioral signals
 
-    The main anti-false-accept change is that one unusually similar gallery
-    photo is no longer sufficient. The logged-in HRIS target must:
-        1. reach a minimum ArcFace similarity;
-        2. have support from its top-3 reference similarities; and
-        3. beat the strongest competing identity by a minimum margin.
+    Performance behavior:
+        - YuNet detection is reused for one frame between detector refreshes.
+        - ArcFace classification is cached briefly when the face box is stable.
+        - One-time direct-vs-DeepFace validation is moved to startup.
+        - Fasnet is preloaded before the recognizer reports READY.
 
-    camera_server.py remains responsible for the existing 3/3 temporal
-    identity confirmation before attendance is finally saved. That 3/3
-    confirmation does not require head movement.
+    Attendance production mode is ONE-SHOT: the first live frame that passes
+    all identity, quality, frontal and passive PAD gates is accepted immediately.
+    There is no temporal 3/3 identity confirmation and no head movement is required.
+
+    The logged-in HRIS target must still:
+        1. reach the minimum ArcFace similarity;
+        2. have support from the target reference samples;
+        3. beat the strongest competing identity by the configured margin; and
+        4. pass the passive Fasnet anti-spoof gate on the current frame.
 
     Gallery:
         known_faces/
@@ -109,6 +110,21 @@ class FaceRecognizer:
     SMALL_FACE_HEIGHT = 70
     BOX_SMOOTH_ALPHA = 0.92
 
+    # Performance: YuNet does not need to be executed for every webcam frame.
+    # The previous detection is reused for one frame, then YuNet refreshes it.
+    # This reduces detector CPU usage without replacing YuNet or lowering the
+    # actual face-quality/security thresholds.
+    YUNET_DETECT_EVERY_N_FRAMES = 2
+    YUNET_MAX_REUSE_FRAMES = 1
+
+    # One-shot attendance recognition: do one FRESH ArcFace inference for the
+    # first valid attendance frame. Do not reuse an old identity cache for the
+    # attendance decision.
+    ONE_SHOT_RECOGNITION = True
+    RECOGNITION_INTERVAL_SECONDS = 0.08
+    RECOGNITION_MAX_CACHE_AGE_SECONDS = 0.0
+    RECOGNITION_BOX_CHANGE_RATIO = 0.15
+
     # ------------------------------------------------------------------
     # FACE QUALITY
     # ------------------------------------------------------------------
@@ -140,11 +156,11 @@ class FaceRecognizer:
     # PAD now calls DeepFace's Fasnet anti-spoof model directly with the
     # already-known YuNet bounding box. YuNet remains the only face detector.
     ANTI_SPOOF_MODEL_NAME = "Fasnet"
-    ANTI_SPOOF_REQUIRED_CONSECUTIVE = 3
-    # Do not run the relatively heavy PAD network on every camera frame.
-    # Three real PAD inferences are still required, but they are spaced out
-    # so the browser camera remains responsive.
-    ANTI_SPOOF_INTERVAL_SECONDS = 0.35
+    # One-shot attendance: one fresh passive PAD result is enough for the
+    # current frame. This is intentionally faster than the previous 3/3 PAD
+    # confirmation and is a security/usability trade-off.
+    ANTI_SPOOF_REQUIRED_CONSECUTIVE = 1
+    ANTI_SPOOF_INTERVAL_SECONDS = 0.08
 
     # Use a padded crop from the original camera frame so the PAD model gets
     # facial detail plus a small amount of surrounding context.
@@ -220,7 +236,7 @@ class FaceRecognizer:
     # ------------------------------------------------------------------
     # CACHE
     # ------------------------------------------------------------------
-    CACHE_VERSION = 402
+    CACHE_VERSION = 403
     CACHE_FILENAME = ".face_embeddings_cache.pkl"
 
     _runtime_configured = False
@@ -270,6 +286,24 @@ class FaceRecognizer:
 
         self._smoothed_box: tuple[float, float, float, float] | None = None
         self._last_detection: dict | None = None
+        self._track_frame_index = 0
+        self._last_detected_frame_index = -10_000
+
+        # ArcFace inference is performed directly through the already-loaded
+        # DeepFace model where possible, avoiding repeated DeepFace.represent()
+        # wrapper overhead. A compatibility fallback remains available.
+        self._direct_arcface_enabled = True
+        self._arcface_warmup_done = False
+        self._direct_arcface_validated = False
+
+        # Short-lived identity cache. This cache stores only ArcFace identity
+        # classification; PAD is never cached as a pass. PAD still evaluates
+        # from the current frame and keeps its own consecutive counter.
+        self._recognition_cache_at = 0.0
+        self._recognition_cache_target = "Unknown"
+        self._recognition_cache_box: tuple[float, float, float, float] | None = None
+        self._recognition_cache_classification: dict | None = None
+        self._recognition_cache_query = None
 
         # Temporal liveness state. This is deliberately separate from the
         # ArcFace identity state so existing recognition thresholds stay intact.
@@ -445,6 +479,7 @@ class FaceRecognizer:
             "Loading cached ArcFace embeddings...": 75,
             "Building ArcFace embeddings...": 80,
             "Calibrating similarity thresholds...": 94,
+            "Loading anti-spoof PAD...": 97,
             "Face recognition ready": 100,
         }
         return mapping.get(status, 40)
@@ -462,11 +497,24 @@ class FaceRecognizer:
             return self._embeddings_ready
 
     def is_ready(self) -> bool:
+        """Return True only when every production gate is already loaded.
+
+        When passive anti-spoofing is enabled, Fasnet is part of readiness.
+        This prevents the camera from becoming usable while the first PAD
+        inference would still have to construct/load the spoofing model.
+        """
         with self._lock:
+            pad_ready = (
+                self._anti_spoof_model is not None
+                if self.ANTI_SPOOF_ENABLED
+                else True
+            )
+
             return (
                 self._model_ready
                 and self._detector_ready
                 and self._embeddings_ready
+                and pad_ready
             )
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
@@ -504,8 +552,14 @@ class FaceRecognizer:
                 "anti_spoof_consecutive": int(self._anti_spoof_consecutive),
                 "anti_spoof_required_consecutive": int(self.ANTI_SPOOF_REQUIRED_CONSECUTIVE),
                 "anti_spoof_interval_seconds": float(self.ANTI_SPOOF_INTERVAL_SECONDS),
+                "one_shot_recognition": bool(self.ONE_SHOT_RECOGNITION),
                 "anti_spoof_reason": self._anti_spoof_last_reason,
                 "yunet_fast_max_side": int(self.YUNET_FAST_MAX_SIDE),
+                "yunet_detect_every_n_frames": int(self.YUNET_DETECT_EVERY_N_FRAMES),
+                "recognition_interval_seconds": float(self.RECOGNITION_INTERVAL_SECONDS),
+                "recognition_cache_age_seconds": float(self.RECOGNITION_MAX_CACHE_AGE_SECONDS),
+                "direct_arcface_inference": bool(self._direct_arcface_enabled),
+                "arcface_warmup_done": bool(self._arcface_warmup_done),
             }
 
     def print_runtime_status(self) -> None:
@@ -516,6 +570,7 @@ class FaceRecognizer:
             f"ArcFace={'LOADED' if status['arcface_loaded'] else 'NOT LOADED'} | "
             f"YuNet={'LOADED' if status['yunet_loaded'] else 'NOT LOADED'} | "
             f"Gallery={'LOADED' if status['embeddings_loaded'] else 'NOT LOADED'} | "
+            f"PAD={'LOADED' if status['anti_spoofing_ready'] else 'NOT LOADED'} | "
             f"Samples={status['gallery_samples']} | "
             f"Ready={'YES' if status['ready'] else 'NO'}",
             flush=True,
@@ -535,9 +590,14 @@ class FaceRecognizer:
                 return
 
             os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-            os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+
+            # One thread can become a bottleneck for ArcFace/YuNet on a normal
+            # desktop CPU. Keep the default conservative and hardware-aware.
+            cpu_count = max(1, int(os.cpu_count() or 2))
+            cpu_threads = max(1, min(4, cpu_count))
+            os.environ.setdefault("TF_NUM_INTRAOP_THREADS", str(cpu_threads))
             os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
-            os.environ.setdefault("OMP_NUM_THREADS", "1")
+            os.environ.setdefault("OMP_NUM_THREADS", str(cpu_threads))
             os.environ.setdefault("KMP_BLOCKTIME", "0")
 
             cls._runtime_configured = True
@@ -838,18 +898,41 @@ class FaceRecognizer:
         if frame is None or not self.is_detector_ready():
             return None, None
 
+        self._track_frame_index += 1
+        frame_index = self._track_frame_index
+
+        reuse_detection = False
+        if self._last_detection is not None:
+            frames_since_detection = frame_index - self._last_detected_frame_index
+            reuse_detection = (
+                frames_since_detection <= self.YUNET_MAX_REUSE_FRAMES
+                and frame_index % self.YUNET_DETECT_EVERY_N_FRAMES != 0
+            )
+
+        if reuse_detection:
+            detection = dict(self._last_detection)
+            stable = self._smooth_box(detection, frame.shape)
+            return detection, stable
+
         detections = self._detect_face_best_scale(frame)
 
         if not detections:
             self._smoothed_box = None
             self._last_detection = None
+            self._last_detected_frame_index = frame_index
             with self._lock:
                 self._reset_liveness_locked(reason="face_lost")
                 self._reset_anti_spoof_locked(reason="face_lost")
+                self._recognition_cache_at = 0.0
+                self._recognition_cache_target = "Unknown"
+                self._recognition_cache_box = None
+                self._recognition_cache_classification = None
+                self._recognition_cache_query = None
             return None, None
 
         detection = detections[0]
         self._last_detection = dict(detection)
+        self._last_detected_frame_index = frame_index
 
         stable = self._smooth_box(detection, frame.shape)
         return detection, stable
@@ -1562,6 +1645,11 @@ class FaceRecognizer:
                 self._model_ready = True
                 self._loading_error = None
 
+            # Warm up the model once so the first live recognition does not pay
+            # TensorFlow graph/tracing/setup latency. Failure does not disable
+            # the model; live inference simply uses the normal path.
+            self._warmup_arcface_model()
+
             print("✅ [ARCFACE] Model loaded and ready.", flush=True)
             return True
 
@@ -1573,6 +1661,38 @@ class FaceRecognizer:
 
             print(f"❌ ArcFace model failed: {exc}", flush=True)
             return False
+
+    def _warmup_arcface_model(self) -> None:
+        if self._arcface_warmup_done:
+            return
+
+        with self._lock:
+            model = self._arcface_model
+
+        if model is None:
+            return
+
+        try:
+            import numpy as np
+
+            dummy = np.zeros(
+                (1, self.ARC_FACE_INPUT_SIZE, self.ARC_FACE_INPUT_SIZE, 3),
+                dtype=np.float32,
+            )
+            # ArcFace normalization used by DeepFace. The warm-up does not need
+            # a real face; it only initializes the TensorFlow execution path.
+            dummy = (dummy - 127.5) / 128.0
+
+            output = model(dummy, training=False)
+            if hasattr(output, "numpy"):
+                output.numpy()
+
+            self._arcface_warmup_done = True
+            print("✅ [ARCFACE] Warm-up complete.", flush=True)
+        except Exception as exc:
+            # Keep the system functional; the normal embedding path will still
+            # run and can fall back to DeepFace.represent().
+            print(f"⚠️ [ARCFACE] Warm-up skipped: {exc}", flush=True)
 
     @classmethod
     def _target_points(cls) -> Any:
@@ -1709,18 +1829,15 @@ class FaceRecognizer:
         except Exception:
             return None
 
-    def _get_embedding(self, face: Any) -> Any:
+    def _get_embedding_deepface(self, face: Any) -> Any:
+        """Compatibility embedding path using DeepFace.represent()."""
         DeepFace = self._load_deepface()
-
         if DeepFace is None or face is None:
             return None
 
+        import numpy as np
+
         try:
-            import numpy as np
-
-            if face.size == 0:
-                return None
-
             result = DeepFace.represent(
                 img_path=face,
                 model_name=self.MODEL_NAME,
@@ -1730,54 +1847,232 @@ class FaceRecognizer:
                 normalization="ArcFace",
                 l2_normalize=True,
             )
+        except TypeError:
+            result = DeepFace.represent(
+                img_path=face,
+                model_name=self.MODEL_NAME,
+                detector_backend="skip",
+                enforce_detection=False,
+                align=False,
+            )
 
-            if not result:
-                return None
+        if not result:
+            return None
 
-            vector = result[0].get("embedding", [])
-            if not vector:
-                return None
+        vector = np.asarray(result[0].get("embedding", []), dtype=np.float32)
+        norm = float(np.linalg.norm(vector))
+        if norm <= 0:
+            return None
 
-            vector = np.asarray(vector, dtype=np.float32)
+        return (vector / norm).astype(np.float32, copy=False)
+
+    def _get_direct_arcface_embedding(self, face: Any) -> Any:
+        """Run ArcFace directly through the already-loaded Keras model."""
+        import numpy as np
+
+        if face is None or getattr(face, "size", 0) == 0:
+            return None
+
+        with self._lock:
+            model = self._arcface_model
+            direct_enabled = bool(self._direct_arcface_enabled)
+
+        if not direct_enabled or model is None:
+            return None
+
+        try:
+            import cv2
+
+            batch = np.asarray(face, dtype=np.float32)
+
+            if batch.ndim == 3:
+                batch = batch[None, ...]
+
+            if batch.ndim != 4 or batch.shape[-1] != 3:
+                raise ValueError(f"Invalid ArcFace input shape: {batch.shape}")
+
+            if batch.shape[1:3] != (
+                self.ARC_FACE_INPUT_SIZE,
+                self.ARC_FACE_INPUT_SIZE,
+            ):
+                batch_image = cv2.resize(
+                    batch[0],
+                    (
+                        self.ARC_FACE_INPUT_SIZE,
+                        self.ARC_FACE_INPUT_SIZE,
+                    ),
+                    interpolation=cv2.INTER_AREA,
+                )
+                batch = batch_image[None, ...].astype(
+                    np.float32,
+                    copy=False,
+                )
+
+            batch = batch[..., ::-1]
+            batch = (batch - 127.5) / 128.0
+
+            output = model(batch, training=False)
+
+            if isinstance(output, (list, tuple)):
+                output = output[0]
+
+            if hasattr(output, "numpy"):
+                output = output.numpy()
+
+            vector = np.asarray(output, dtype=np.float32)
+
+            if vector.ndim == 2:
+                vector = vector[0]
+
+            vector = vector.reshape(-1)
+
+            if vector.size == 0:
+                raise RuntimeError("ArcFace direct output is empty")
 
             norm = float(np.linalg.norm(vector))
             if norm <= 0:
-                return None
+                raise RuntimeError("ArcFace direct embedding norm is zero")
 
             return (vector / norm).astype(np.float32, copy=False)
 
-        except TypeError:
-            # Compatibility fallback if the installed DeepFace version does not
-            # expose normalization/l2_normalize in represent().
+        except Exception as exc:
+            print(
+                f"⚠️ [ARCFACE] Direct inference error: {exc}",
+                flush=True,
+            )
+            return None
+
+    def _validate_direct_arcface_with_gallery(self) -> None:
+        """Validate direct ArcFace once during startup, not on first camera frame."""
+        import numpy as np
+
+        with self._lock:
+            if not self._direct_arcface_enabled or self._direct_arcface_validated:
+                return
+
+        files = self._get_gallery_files()
+        if not files:
+            return
+
+        for identity, path in files:
             try:
-                import numpy as np
+                image = self._read_image(str(path))
+                if image is None:
+                    continue
 
-                result = DeepFace.represent(
-                    img_path=face,
-                    model_name=self.MODEL_NAME,
-                    detector_backend="skip",
-                    enforce_detection=False,
-                    align=False,
+                detections = self._detect_face_best_scale(image)
+                if not detections:
+                    continue
+
+                detection = detections[0]
+                aligned = self._align_face(image, detection)
+                if aligned is None:
+                    continue
+
+                direct_vector = self._get_direct_arcface_embedding(aligned)
+                if direct_vector is None:
+                    return
+
+                reference_vector = self._get_embedding_deepface(aligned)
+                if reference_vector is None:
+                    print(
+                        f"⚠️ [ARCFACE] Startup direct-vs-DeepFace validation "
+                        f"skipped for {identity}/{path.name}: reference embedding unavailable.",
+                        flush=True,
+                    )
+                    with self._lock:
+                        self._direct_arcface_validated = True
+                    return
+
+                if reference_vector.size != direct_vector.size:
+                    print(
+                        "⚠️ [ARCFACE] Startup direct embedding size mismatch; "
+                        "falling back to DeepFace.represent().",
+                        flush=True,
+                    )
+                    with self._lock:
+                        self._direct_arcface_enabled = False
+                        self._direct_arcface_validated = True
+                    return
+
+                consistency = float(np.dot(direct_vector, reference_vector))
+                print(
+                    f"🧪 [ARCFACE] Startup direct-vs-DeepFace "
+                    f"consistency={consistency:.4f} using {path.name}",
+                    flush=True,
                 )
 
-                if not result:
-                    return None
+                with self._lock:
+                    self._direct_arcface_validated = True
 
-                vector = np.asarray(
-                    result[0].get("embedding", []),
-                    dtype=np.float32,
-                )
+                    if consistency < 0.97:
+                        self._direct_arcface_enabled = False
 
-                norm = float(np.linalg.norm(vector))
-                if norm <= 0:
-                    return None
+                if consistency < 0.97:
+                    print(
+                        "⚠️ [ARCFACE] Direct preprocessing differs from "
+                        "DeepFace; using compatibility inference for accuracy.",
+                        flush=True,
+                    )
 
-                return (vector / norm).astype(np.float32, copy=False)
+                return
 
             except Exception as exc:
-                print(f"⚠️ ArcFace embedding error: {exc}", flush=True)
-                return None
+                print(
+                    f"⚠️ [ARCFACE] Startup direct validation skipped: {exc}",
+                    flush=True,
+                )
+                return
 
+    def _get_embedding(self, face: Any) -> Any:
+        """Return a normalized ArcFace embedding with a low-overhead fast path."""
+        DeepFace = self._load_deepface()
+
+        if DeepFace is None or face is None:
+            return None
+
+        try:
+            import numpy as np
+
+            direct_vector = self._get_direct_arcface_embedding(face)
+
+            if direct_vector is not None:
+                if not self._direct_arcface_validated:
+                    reference_vector = self._get_embedding_deepface(face)
+
+                    with self._lock:
+                        self._direct_arcface_validated = True
+
+                    if (
+                        reference_vector is not None
+                        and reference_vector.size == direct_vector.size
+                    ):
+                        consistency = float(
+                            np.dot(direct_vector, reference_vector)
+                        )
+
+                        print(
+                            f"🧪 [ARCFACE] Late direct-vs-DeepFace "
+                            f"consistency={consistency:.4f}",
+                            flush=True,
+                        )
+
+                        if consistency < 0.97:
+                            with self._lock:
+                                self._direct_arcface_enabled = False
+
+                            return reference_vector
+
+                return direct_vector
+
+        except Exception as exc:
+            print(
+                f"⚠️ [ARCFACE] Direct inference fallback: {exc}",
+                flush=True,
+            )
+
+        try:
+            return self._get_embedding_deepface(face)
         except Exception as exc:
             print(f"⚠️ ArcFace embedding error: {exc}", flush=True)
             return None
@@ -3029,6 +3324,88 @@ class FaceRecognizer:
                 )
             )
 
+    def _recognition_cache_is_usable(
+        self,
+        target: str,
+        detection: dict,
+    ) -> bool:
+        if self._recognition_cache_classification is None:
+            return False
+
+        age = time.monotonic() - self._recognition_cache_at
+        if age < 0 or age > self.RECOGNITION_MAX_CACHE_AGE_SECONDS:
+            return False
+
+        if age > self.RECOGNITION_INTERVAL_SECONDS:
+            return False
+
+        if self._recognition_cache_target != target:
+            return False
+
+        cached_box = self._recognition_cache_box
+        if cached_box is None:
+            return False
+
+        current_box = (
+            float(detection.get("x", 0.0)),
+            float(detection.get("y", 0.0)),
+            float(detection.get("w", 0.0)),
+            float(detection.get("h", 0.0)),
+        )
+
+        _, _, cached_w, cached_h = cached_box
+        _, _, current_w, current_h = current_box
+        scale = max(cached_w, cached_h, current_w, current_h, 1.0)
+
+        center_cached = (
+            cached_box[0] + cached_box[2] * 0.5,
+            cached_box[1] + cached_box[3] * 0.5,
+        )
+        center_current = (
+            current_box[0] + current_box[2] * 0.5,
+            current_box[1] + current_box[3] * 0.5,
+        )
+
+        center_delta = math.hypot(
+            center_current[0] - center_cached[0],
+            center_current[1] - center_cached[1],
+        ) / scale
+
+        size_delta = max(
+            abs(current_w - cached_w) / max(cached_w, 1.0),
+            abs(current_h - cached_h) / max(cached_h, 1.0),
+        )
+
+        return (
+            center_delta <= self.RECOGNITION_BOX_CHANGE_RATIO
+            and size_delta <= self.RECOGNITION_BOX_CHANGE_RATIO
+        )
+
+    def _store_recognition_cache(
+        self,
+        target: str,
+        detection: dict,
+        classification: dict,
+        query: Any,
+    ) -> None:
+        self._recognition_cache_at = time.monotonic()
+        self._recognition_cache_target = target
+        self._recognition_cache_box = (
+            float(detection.get("x", 0.0)),
+            float(detection.get("y", 0.0)),
+            float(detection.get("w", 0.0)),
+            float(detection.get("h", 0.0)),
+        )
+        self._recognition_cache_classification = classification
+        self._recognition_cache_query = query
+
+    def _clear_recognition_cache_locked(self) -> None:
+        self._recognition_cache_at = 0.0
+        self._recognition_cache_target = "Unknown"
+        self._recognition_cache_box = None
+        self._recognition_cache_classification = None
+        self._recognition_cache_query = None
+
     # ================================================================
     # Main recognition API
     # ================================================================
@@ -3041,21 +3418,24 @@ class FaceRecognizer:
         tolerance: float | None = None,
         require_liveness: bool = True,
     ) -> tuple[str, float, bool]:
-        """Verify the logged-in HRIS target using the existing ArcFace rules.
+        """Recognize the HRIS target once with ArcFace and passive PAD.
 
-        Existing identity acceptance remains unchanged:
-          * quality gate passes;
-          * the HRIS target is the strongest identity by best similarity;
-          * target best similarity >= calibrated target threshold;
-          * target top-3 mean similarity >= calibrated target support threshold;
-          * target-vs-runner margin >= calibrated margin threshold.
+        In ONE_SHOT_RECOGNITION mode the first valid frame is evaluated with a
+        fresh ArcFace embedding (no identity cache), then one fresh Fasnet PAD
+        inference. If all gates pass, the target is returned immediately.
 
-        Additional live-camera gate:
-          * when require_liveness=True, temporal liveness must pass before
-            face_confident can become True.
+        Production order:
+            1. alignment + current-frame quality
+            2. ArcFace identity inference / short-lived cache
+            3. target-vs-gallery similarity decision
+            4. passive frontal-pose gate
+            5. passive Fasnet anti-spoof gate
+            6. final TARGET acceptance
 
-        The liveness gate does not alter ArcFace embeddings, thresholds,
-        gallery ranking, top-3 support, or identity-margin calculations.
+        ArcFace is deliberately evaluated before the frontal hard-reject so the
+        system can identify the strongest gallery candidate immediately.
+        A face is still accepted only when all configured security and identity
+        gates pass. No head movement is required.
         """
         del tolerance
 
@@ -3067,6 +3447,7 @@ class FaceRecognizer:
             return "Unknown", 0.0, False
 
         target = self.format_person_name(target_identity)
+
         if target == "Unknown":
             with self._lock:
                 self._last_target_identity = target
@@ -3076,10 +3457,9 @@ class FaceRecognizer:
                 self._last_decision_reason = "target_unknown"
             return "Unknown", 0.0, False
 
-        # Reject impossible target early if this identity is not actually in
-        # the loaded gallery.
         with self._lock:
             target_indices = list(self._identity_to_indices.get(target, []))
+
         if not target_indices:
             with self._lock:
                 self._last_target_identity = target
@@ -3094,9 +3474,15 @@ class FaceRecognizer:
         if aligned is None:
             with self._lock:
                 self._last_decision_reason = "alignment_failed"
+                self._last_face_confident = False
             return "Unknown", 0.0, False
 
-        quality_ok, quality_score = self._quality_check(frame, detection, aligned)
+        quality_ok, quality_score = self._quality_check(
+            frame,
+            detection,
+            aligned,
+        )
+
         if not quality_ok:
             with self._lock:
                 self._last_match_name = "Unknown"
@@ -3112,77 +3498,76 @@ class FaceRecognizer:
                 self._last_target_topk_threshold = self._target_topk_threshold(target)
                 self._last_target_margin_threshold = self._target_margin_threshold(target)
                 self._last_decision_reason = "quality_failed"
-                self._last_decision_mode = "target_top3_margin"
+                self._last_decision_mode = "one-shot+arcface+frontal+pad+target_top3_margin"
             return "Unknown", 0.0, False
 
         # --------------------------------------------------------------
-        # FRONTAL GATE FIRST, THEN ARC FACE, THEN PASSIVE PAD
+        # 1) ARC FACE IDENTITY
         # --------------------------------------------------------------
-        # IMPORTANT: similarity is computed before PAD so the UI/logs show the
-        # actual identity score even while PAD is warming up. Security is not
-        # weakened: face_confident can only become True after PAD also passes.
-        frontal_ok, frontal_score, frontal_reason = self._frontal_pose_check(
-            detection
+        classification = None
+        query = None
+
+        if (
+            not self.ONE_SHOT_RECOGNITION
+            and self._recognition_cache_is_usable(target, detection)
+        ):
+            classification = self._recognition_cache_classification
+            query = self._recognition_cache_query
+
+        if classification is None:
+            query = self._get_embedding(aligned)
+
+            if query is None:
+                with self._lock:
+                    self._last_match_name = "Unknown"
+                    self._last_similarity = 0.0
+                    self._last_face_confident = False
+                    self._last_quality_ok = True
+                    self._last_quality_score = float(quality_score)
+                    self._last_target_identity = target
+                    self._last_target_sample_count = len(target_indices)
+                    self._last_target_topk_mean = 0.0
+                    self._last_target_margin = 0.0
+                    self._last_competitor_best = 0.0
+                    self._last_target_topk_threshold = self._target_topk_threshold(target)
+                    self._last_target_margin_threshold = self._target_margin_threshold(target)
+                    self._last_decision_reason = "embedding_failed"
+                    self._last_decision_mode = "one-shot+arcface+frontal+pad+target_top3_margin"
+                return "Unknown", 0.0, False
+
+            classification = self._classify_query(query)
+            self._store_recognition_cache(
+                target,
+                detection,
+                classification,
+                query,
+            )
+
+        best_identity = self.format_person_name(
+            classification["best_identity"]
         )
-
-        if not frontal_ok:
-            with self._lock:
-                self._last_match_name = "Unknown"
-                self._last_similarity = 0.0
-                self._last_face_confident = False
-                self._last_quality_ok = True
-                self._last_quality_score = float(quality_score)
-                self._last_target_identity = target
-                self._last_target_sample_count = len(target_indices)
-                self._last_target_topk_mean = 0.0
-                self._last_target_margin = 0.0
-                self._last_competitor_best = 0.0
-                self._last_target_topk_threshold = self._target_topk_threshold(target)
-                self._last_target_margin_threshold = self._target_margin_threshold(target)
-                self._last_decision_reason = f"frontal_{frontal_reason}"
-                self._last_decision_mode = "frontal+pad+target_top3_margin"
-                self._last_liveness_ok = False
-                self._last_liveness_phase = "frontal_required"
-                self._last_liveness_reason = frontal_reason
-                self._last_liveness_score = float(frontal_score)
-
-            return "Unknown", 0.0, False
-
-        query = self._get_embedding(aligned)
-        if query is None:
-            with self._lock:
-                self._last_match_name = "Unknown"
-                self._last_similarity = 0.0
-                self._last_face_confident = False
-                self._last_quality_ok = True
-                self._last_quality_score = float(quality_score)
-                self._last_target_identity = target
-                self._last_target_sample_count = len(target_indices)
-                self._last_target_topk_mean = 0.0
-                self._last_target_margin = 0.0
-                self._last_competitor_best = 0.0
-                self._last_target_topk_threshold = self._target_topk_threshold(target)
-                self._last_target_margin_threshold = self._target_margin_threshold(target)
-                self._last_decision_reason = "embedding_failed"
-                self._last_decision_mode = "frontal+pad+target_top3_margin"
-            return "Unknown", 0.0, False
-
-        classification = self._classify_query(query)
-        best_identity = self.format_person_name(classification["best_identity"])
         best_similarity = float(classification["best_similarity"])
         best_topk_mean = float(classification.get("best_topk_mean", 0.0))
-        runner_identity = self.format_person_name(classification["runner_up_identity"])
-        runner_similarity = float(classification["runner_up_similarity"])
+        runner_identity = self.format_person_name(
+            classification["runner_up_identity"]
+        )
+        runner_similarity = float(
+            classification["runner_up_similarity"]
+        )
         gallery_margin = float(classification["gallery_margin"])
 
-        # IMPORTANT: compare the actual HRIS target specifically. The gallery
-        # winner is retained only as a diagnostic. This avoids accepting a
-        # different enrolled person under the target's login.
         identity_scores = classification.get("identity_scores", {})
         target_stats = identity_scores.get(
             target,
-            {"best": 0.0, "topk_mean": 0.0, "second": 0.0, "third": 0.0, "sample_count": 0},
+            {
+                "best": 0.0,
+                "topk_mean": 0.0,
+                "second": 0.0,
+                "third": 0.0,
+                "sample_count": 0,
+            },
         )
+
         target_best = float(target_stats.get("best", 0.0))
         target_topk_mean = float(target_stats.get("topk_mean", 0.0))
         target_second = float(target_stats.get("second", 0.0))
@@ -3193,29 +3578,88 @@ class FaceRecognizer:
             for identity, stats in identity_scores.items()
             if identity != target
         ]
-        competitor_best = max(competing_scores) if competing_scores else 0.0
+        competitor_best = (
+            max(competing_scores)
+            if competing_scores
+            else 0.0
+        )
         target_margin = target_best - competitor_best
 
         max_threshold = self._target_threshold(target)
         topk_threshold = self._target_topk_threshold(target)
         margin_threshold = self._target_margin_threshold(target)
-
-        # The target must also be the identity winner. If another enrolled
-        # identity scores higher, this is a hard reject for the current HRIS.
         target_is_gallery_winner = best_identity == target
 
-        # Passive anti-spoof gate. PAD is throttled internally so this call
-        # remains responsive even when camera_server submits several frames/sec.
+        # --------------------------------------------------------------
+        # 2) PASSIVE FRONTAL GATE
+        # --------------------------------------------------------------
+        frontal_ok, frontal_score, frontal_reason = self._frontal_pose_check(
+            detection
+        )
+
+        if not frontal_ok:
+            with self._lock:
+                self._last_match_name = "Unknown"
+                self._last_similarity = target_best
+                self._last_face_confident = False
+                self._last_quality_ok = True
+                self._last_quality_score = float(quality_score)
+                self._last_target_identity = target
+                self._last_target_threshold = float(max_threshold)
+                self._last_target_sample_count = len(target_indices)
+                self._last_target_topk_mean = float(target_topk_mean)
+                self._last_target_margin = float(target_margin)
+                self._last_competitor_best = float(competitor_best)
+                self._last_target_topk_threshold = float(topk_threshold)
+                self._last_target_margin_threshold = float(margin_threshold)
+                self._last_gallery_best_identity = best_identity
+                self._last_gallery_best_similarity = best_similarity
+                self._last_gallery_runner_up_identity = runner_identity
+                self._last_gallery_runner_up_similarity = runner_similarity
+                self._last_gallery_margin = gallery_margin
+                self._last_decision_reason = f"frontal_{frontal_reason}"
+                self._last_decision_mode = "one-shot+arcface+frontal+pad+target_top3_margin"
+                self._last_liveness_ok = False
+                self._last_liveness_phase = "frontal_required"
+                self._last_liveness_reason = frontal_reason
+                self._last_liveness_score = float(frontal_score)
+
+            print(
+                "🔎 [ARCFACE] "
+                f"Candidate=Unknown "
+                f"target={target} "
+                f"target_best={target_best:.3f} "
+                f"target_top3={target_topk_mean:.3f}/{topk_threshold:.3f} "
+                f"margin={target_margin:.3f}/{margin_threshold:.3f} "
+                f"gallery_best={best_identity} "
+                f"gallery_best_sim={best_similarity:.3f} "
+                f"frontal=FAIL:{frontal_reason} "
+                f"reason=frontal_{frontal_reason}",
+                flush=True,
+            )
+            return "Unknown", target_best, False
+
+        # --------------------------------------------------------------
+        # 3) PASSIVE ANTI-SPOOF / PAD
+        # --------------------------------------------------------------
         pad_ok = True
         pad_score = 1.0
         pad_reason = "disabled_or_bypassed"
+
         if require_liveness and self.ANTI_SPOOF_ENABLED:
+            if self.ONE_SHOT_RECOGNITION:
+                with self._lock:
+                    self._anti_spoof_last_inference_at = 0.0
+                    self._anti_spoof_last_ok = False
             pad_ok, pad_score, pad_reason = self._check_anti_spoof(
                 frame,
                 detection,
                 target,
             )
 
+        # --------------------------------------------------------------
+        # 4) FINAL TARGET ACCEPTANCE
+        # --------------------------------------------------------------
         accepted = bool(
             quality_ok
             and frontal_ok
@@ -3267,9 +3711,9 @@ class FaceRecognizer:
             self._last_gallery_margin = gallery_margin
             self._last_decision_reason = reason
             self._last_decision_mode = (
-                "frontal+pad+target_top3_margin"
-                if (require_liveness and self.ANTI_SPOOF_ENABLED)
-                else "target_top3_margin"
+                "arcface+frontal+pad+target_top3_margin"
+                if require_liveness and self.ANTI_SPOOF_ENABLED
+                else "arcface+frontal+target_top3_margin"
             )
             self._last_liveness_ok = bool(pad_ok)
             self._last_liveness_phase = "pad_passed" if pad_ok else "pad"
@@ -3285,6 +3729,8 @@ class FaceRecognizer:
             f"margin={target_margin:.3f}/{margin_threshold:.3f} "
             f"quality={'OK' if quality_ok else 'FAIL'} "
             f"quality_score={quality_score:.2f} "
+            f"frontal={'OK' if frontal_ok else 'FAIL'} "
+            f"frontal_score={frontal_score:.2f} "
             f"target={target} "
             f"target_best={target_best:.3f} "
             f"target_second={target_second:.3f} "
@@ -3296,9 +3742,11 @@ class FaceRecognizer:
             f"gallery_runner={runner_identity} "
             f"gallery_runner_sim={runner_similarity:.3f} "
             f"gallery_margin={gallery_margin:.3f} "
+            f"pad={'OK' if pad_ok else 'WAIT/FAIL'} "
+            f"pad_score={pad_score:.3f} "
             f"target_samples={len(target_indices)} "
             f"reason={reason} "
-            f"mode=frontal+pad+target_top3_margin",
+            f"mode=one-shot+arcface+frontal+pad+target_top3_margin",
             flush=True,
         )
 
@@ -3346,6 +3794,12 @@ class FaceRecognizer:
                 "anti_spoof_required_consecutive": int(self.ANTI_SPOOF_REQUIRED_CONSECUTIVE),
                 "anti_spoof_reason": self._anti_spoof_last_reason,
                 "anti_spoof_model": self.ANTI_SPOOF_MODEL_NAME,
+                "recognition_cache_active": bool(
+                    self._recognition_cache_classification is not None
+                    and self._recognition_cache_target == target
+                    and (time.monotonic() - self._recognition_cache_at)
+                    <= self.RECOGNITION_MAX_CACHE_AGE_SECONDS
+                ),
 
                 "model": self.MODEL_NAME,
                 "metric": self.MATCH_METRIC,
@@ -3399,7 +3853,7 @@ class FaceRecognizer:
                 ),
                 "model": self.MODEL_NAME,
                 "metric": self.MATCH_METRIC,
-                "mode": "frontal+pad+target_top3_margin",
+                "mode": "arcface+frontal+pad+target_top3_margin",
                 "liveness_enabled": False,
                 "anti_spoofing_enabled": bool(self.ANTI_SPOOF_ENABLED),
                 "anti_spoof_required_consecutive": int(self.ANTI_SPOOF_REQUIRED_CONSECUTIVE),
@@ -3432,16 +3886,37 @@ class FaceRecognizer:
 
             self._set_stage("Loading cached ArcFace embeddings...")
 
-            if not self._load_embedding_cache():
-                success = self._build_embeddings()
-            else:
-                        # Cache already contains calibrated thresholds.
+            if self._load_embedding_cache():
                 success = True
+            else:
+                success = self._build_embeddings()
 
-            if success:
-                self._index_dataset()
-                self.print_runtime_status()
-                self.print_threshold_profile()
+            if not success:
+                return
+
+            self._index_dataset()
+
+            # Validate direct ArcFace during startup so the first live frame
+            # does not pay the DeepFace compatibility-check cost.
+            self._validate_direct_arcface_with_gallery()
+
+            # Fasnet is a mandatory production gate when enabled. Do not mark
+            # the recognizer ready until the PAD model is fully loaded.
+            if self.ANTI_SPOOF_ENABLED:
+                self._set_stage("Loading anti-spoof PAD...")
+                pad_model = self._load_anti_spoof_model()
+
+                if pad_model is None:
+                    with self._lock:
+                        self._loading_error = (
+                            "Anti-spoof PAD gagal dimuat; "
+                            "recognizer tetap NOT READY."
+                        )
+                    success = False
+                    return
+
+            self.print_runtime_status()
+            self.print_threshold_profile()
 
         except Exception as exc:
             with self._lock:
@@ -3458,10 +3933,25 @@ class FaceRecognizer:
 
     def prepare_all_async(self) -> None:
         with self._lock:
-            if self._model_ready and self._detector_ready and self._embeddings_ready:
+            pad_ready = (
+                self._anti_spoof_model is not None
+                if self.ANTI_SPOOF_ENABLED
+                else True
+            )
+
+            if (
+                self._model_ready
+                and self._detector_ready
+                and self._embeddings_ready
+                and pad_ready
+            ):
                 return
 
-            if self._loading and self._prepare_thread and self._prepare_thread.is_alive():
+            if (
+                self._loading
+                and self._prepare_thread
+                and self._prepare_thread.is_alive()
+            ):
                 return
 
             self._loading = True
@@ -3514,6 +4004,8 @@ class FaceRecognizer:
             self._identity_calibration = {}
             self._embedding_signature = None
             self._embeddings_ready = False
+            self._clear_recognition_cache_locked()
+            self._direct_arcface_validated = False
             self._reset_liveness_locked(reason="embeddings_cleared")
             self._reset_anti_spoof_locked(reason="embeddings_cleared")
             self._ready_event.clear()
@@ -3541,6 +4033,8 @@ class FaceRecognizer:
             self._last_target_margin_threshold = self.DEFAULT_MARGIN
             self._last_decision_reason = "not_evaluated"
             self._last_decision_mode = "similarity_only"
+            self._clear_recognition_cache_locked()
+            self._direct_arcface_validated = False
             self._reset_liveness_locked(reason="reload")
             self._reset_anti_spoof_locked(reason="reload")
 
@@ -4483,6 +4977,3 @@ __all__ = [
 
 if __name__ == "__main__":
     raise SystemExit(_main_cli())
-
-
-
