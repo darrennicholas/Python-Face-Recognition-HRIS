@@ -16,10 +16,7 @@ body {
     min-height: 100dvh;
     display: grid;
     place-items: center;
-    padding: max(16px, env(safe-area-inset-top))
-        max(16px, env(safe-area-inset-right))
-        max(16px, env(safe-area-inset-bottom))
-        max(16px, env(safe-area-inset-left));
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
 }
 
 .camera-page {
@@ -28,73 +25,76 @@ body {
     gap: 12px;
 }
 
-/* =========================================================
-   CAMERA FRAME
-   ========================================================= */
+.back-button {
+    justify-self: start;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 42px;
+    padding: 10px 16px;
+    border: 1px solid #cfe0d4;
+    border-radius: 10px;
+    background: #fff;
+    color: #245a34;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+    transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.back-button:hover {
+    background: #f6fbf7;
+    border-color: #9fc7aa;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+}
+
+.back-button:active {
+    transform: translateY(0);
+}
+
+.back-button:focus-visible {
+    outline: 3px solid rgba(25, 135, 84, 0.2);
+    outline-offset: 2px;
+}
+
+.back-icon {
+    font-size: 20px;
+    line-height: 0.8;
+}
 
 .camera-wrapper {
     position: relative;
-
     width: 100%;
-
     overflow: hidden;
-
     background: #000;
-
     border-radius: 16px;
-
-    box-shadow:
-        0 10px 30px
-        rgba(0, 0, 0, 0.12);
-
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
     aspect-ratio: 4 / 3;
 }
 
-
 #camera {
     position: absolute;
-
     inset: 0;
-
     width: 100%;
     height: 100%;
-
     display: block;
-
-    /*
-     * IMPORTANT:
-     * No crop.
-     */
     object-fit: fill;
-
     background: #000;
-
-    /*
-     * Mirror webcam preview.
-     */
     transform: scaleX(-1);
 }
 
-
 #overlay {
     position: absolute;
-
     inset: 0;
-
     width: 100%;
     height: 100%;
-
     pointer-events: none;
-
-    /*
-     * Canvas must remain unmirrored.
-     */
     transform: none;
 }
-
-/* =========================================================
-   LOADING
-   ========================================================= */
 
 .loading {
     position: absolute;
@@ -118,25 +118,16 @@ body {
 .spinner {
     width: 34px;
     height: 34px;
-    border: 3px solid rgba(255, 255, 255, 0.30);
+    border: 3px solid rgba(255, 255, 255, 0.3);
     border-top-color: #fff;
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
 }
 
 @keyframes spin {
-    from {
-        transform: rotate(0deg);
-    }
-
-    to {
-        transform: rotate(360deg);
-    }
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
-
-/* =========================================================
-   STATUS
-   ========================================================= */
 
 .camera-status {
     width: 100%;
@@ -176,22 +167,21 @@ body {
     line-height: 1.35;
 }
 
-/* =========================================================
-   RESPONSIVE
-   ========================================================= */
-
 @media (max-width: 650px) {
     body {
-        /* Keep the camera and its information panel centered as one group. */
         place-items: center;
-        padding: max(12px, env(safe-area-inset-top))
-            max(12px, env(safe-area-inset-right))
-            max(20px, env(safe-area-inset-bottom))
-            max(12px, env(safe-area-inset-left));
+        padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
     }
 
     .camera-page {
         gap: 10px;
+    }
+
+    .back-button {
+        width: 100%;
+        min-height: 44px;
+        padding: 11px 14px;
+        font-size: 14px;
     }
 
     .camera-status {
@@ -213,6 +203,11 @@ body {
 @media (max-width: 380px) {
     .camera-wrapper {
         border-radius: 12px;
+    }
+
+    .back-button {
+        min-height: 42px;
+        font-size: 13px;
     }
 
     .status-item strong {

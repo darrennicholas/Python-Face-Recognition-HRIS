@@ -1,102 +1,37 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
     <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
-
-    <title>
-        HR Attendance Camera
-    </title>
-
-    <link
-        rel="stylesheet"
-        href="/camera_web.css"
-    >
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HR Attendance Camera</title>
+    <link rel="stylesheet" href="/camera_web.css">
 </head>
-
-
 <body>
-
     <main class="camera-page">
-
+        <button id="backToHrisButton" class="back-button" type="button" aria-label="Kembali ke HRIS">
+            <span class="back-icon" aria-hidden="true">←</span>
+            <span>Kembali ke HRIS</span>
+        </button>
         <div class="camera-wrapper">
-
-        <video
-            id="camera"
-            autoplay
-            playsinline
-            muted
-        ></video>
-
-
-        <canvas
-            id="overlay"
-        ></canvas>
-
-
-        <div
-            id="loading"
-            class="loading"
-        >
-            Starting camera...
+            <video id="camera" autoplay playsinline muted></video>
+            <canvas id="overlay"></canvas>
+            <div id="loading" class="loading">Starting camera...</div>
         </div>
-
-        </div>
-
-
-        <section
-            class="camera-status"
-            aria-label="Camera recognition status"
-        >
-
+        <section class="camera-status" aria-label="Camera recognition status">
             <div class="status-item">
-            <small class="label">
-                STATUS
-            </small>
-
-            <strong id="status">
-                Starting...
-            </strong>
+                <small class="label">STATUS</small>
+                <strong id="status">Starting...</strong>
             </div>
-
-
             <div class="status-item">
-            <small class="label">
-                IDENTITY
-            </small>
-
-            <strong id="identity">
-                Unknown
-            </strong>
+                <small class="label">IDENTITY</small>
+                <strong id="identity">Unknown</strong>
             </div>
-
-
             <div class="status-item">
-            <small class="label">
-                SIMILARITY
-            </small>
-
-            <strong id="similarity">
-                0.0%
-            </strong>
+                <small class="label">SIMILARITY</small>
+                <strong id="similarity">0.0%</strong>
             </div>
-
         </section>
-
     </main>
-
-
-    <script
-        src="/camera_web.js"
-    ></script>
-
+    <script src="/camera_web.js"></script>
 </body>
-
 </html>
