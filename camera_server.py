@@ -1400,7 +1400,7 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
             "detector_ready": recognizer.is_detector_ready(),
             "model_ready": recognizer.is_model_ready(),
             "embeddings_ready": recognizer.is_embeddings_ready(),
-            "recognition_ready": recognizer.is_ready(),
+            "recognition_ready": recognizer.is_recognition_ready(),
         }
 
     # ONE-SHOT TERMINAL STATE: do not run YuNet/ArcFace/PAD again after a
@@ -1435,7 +1435,7 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
             "detector_ready": recognizer.is_detector_ready(),
             "model_ready": recognizer.is_model_ready(),
             "embeddings_ready": recognizer.is_embeddings_ready(),
-            "recognition_ready": recognizer.is_ready(),
+            "recognition_ready": recognizer.is_recognition_ready(),
         }
 
     if not recognizer.is_detector_ready():
@@ -1493,7 +1493,7 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
             "detector_ready": True,
             "model_ready": recognizer.is_model_ready(),
             "embeddings_ready": recognizer.is_embeddings_ready(),
-            "recognition_ready": recognizer.is_ready(),
+            "recognition_ready": recognizer.is_recognition_ready(),
         }
 
     queue_recognition(frame, detection)
@@ -1587,7 +1587,7 @@ def process_frame(message: bytes, session_id: str | None = None) -> dict:
         "detector_ready": True,
         "model_ready": recognizer.is_model_ready(),
         "embeddings_ready": recognizer.is_embeddings_ready(),
-        "recognition_ready": recognizer.is_ready(),
+        "recognition_ready": recognizer.is_recognition_ready(),
     }
 
 
@@ -1943,21 +1943,13 @@ def _register_face_images(
     )
 
     with FACE_REGISTRATION_LOCK:
-        registration_lock_file = (
-            target_folder /
-            f".{base_name}.registered"
-        )
-
         existing_files = sorted(
             target_folder.glob(
                 f"{base_name}_*.jpg"
             )
         )
 
-        if (
-            registration_lock_file.exists()
-            or existing_files
-        ):
+        if existing_files:
             raise FaceRegistrationLockedError(
                 "Wajah user sudah terdaftar. "
                 "Registrasi wajah hanya dapat dilakukan satu kali."
@@ -2016,13 +2008,6 @@ def _register_face_images(
                 "✅ [REGISTRATION] "
                 f"Gallery READY | embeddings={gallery_count}",
                 flush=True,
-            )
-
-            # Filesystem lock: this registration can never be edited
-            # or registered again through this service.
-            registration_lock_file.write_text(
-                "registered\n",
-                encoding="utf-8",
             )
 
             return {
@@ -2088,21 +2073,13 @@ def _get_face_registration_status(
         first_name
     )
 
-    registration_lock_file = (
-        target_folder /
-        f".{base_name}.registered"
-    )
-
     existing_files = sorted(
         target_folder.glob(
             f"{base_name}_*.jpg"
         )
     )
 
-    registered = bool(
-        registration_lock_file.exists()
-        or existing_files
-    )
+    registered = bool(existing_files)
 
     return {
         "success": True,
@@ -2887,7 +2864,16 @@ def start_camera_servers_once() -> None:
         _servers_started = True
 
         print("🚀 [ML] Starting face-recognition preload...", flush=True)
-        start_process_preload()
+        # Preload is asynchronous and non-blocking. An empty known_faces/
+        # directory is a valid first-run state because registration can happen
+        # after the service starts.
+        try:
+            start_process_preload()
+        except Exception as exc:
+            print(
+                f"⚠️ [ML] Preload scheduling warning: {exc}",
+                flush=True,
+            )
         print_ml_status("START")
 
         http_thread = threading.Thread(

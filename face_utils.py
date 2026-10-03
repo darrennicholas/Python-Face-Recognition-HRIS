@@ -480,6 +480,8 @@ class FaceRecognizer:
             "Building ArcFace embeddings...": 80,
             "Calibrating similarity thresholds...": 94,
             "Loading anti-spoof PAD...": 97,
+            "No registered faces - waiting for face registration...": 100,
+            "Runtime ready - waiting for face registration": 100,
             "Face recognition ready": 100,
         }
         return mapping.get(status, 40)
@@ -497,11 +499,10 @@ class FaceRecognizer:
             return self._embeddings_ready
 
     def is_ready(self) -> bool:
-        """Return True only when every production gate is already loaded.
+        """Return True when the runtime models required by the service are loaded.
 
-        When passive anti-spoofing is enabled, Fasnet is part of readiness.
-        This prevents the camera from becoming usable while the first PAD
-        inference would still have to construct/load the spoofing model.
+        An empty known_faces/ gallery is valid on first startup because the
+        registration endpoint may enroll the first employee after startup.
         """
         with self._lock:
             pad_ready = (
@@ -509,7 +510,20 @@ class FaceRecognizer:
                 if self.ANTI_SPOOF_ENABLED
                 else True
             )
+            return (
+                self._model_ready
+                and self._detector_ready
+                and pad_ready
+            )
 
+    def is_recognition_ready(self) -> bool:
+        """Return True only when runtime models and the face gallery are ready."""
+        with self._lock:
+            pad_ready = (
+                self._anti_spoof_model is not None
+                if self.ANTI_SPOOF_ENABLED
+                else True
+            )
             return (
                 self._model_ready
                 and self._detector_ready
@@ -518,6 +532,11 @@ class FaceRecognizer:
             )
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
+        """Wait for runtime model readiness.
+
+        known_faces/ may be empty here; this must not block application startup
+        or prevent face registration.
+        """
         if self.is_ready():
             return True
         self._ready_event.wait(timeout=timeout)
@@ -533,6 +552,7 @@ class FaceRecognizer:
                 "yunet_loaded": self._detector_ready and self._yunet is not None,
                 "embeddings_loaded": self._embeddings_ready,
                 "ready": self.is_ready(),
+                "recognition_ready": self.is_recognition_ready(),
                 "loading": self._loading,
                 "stage": self._loading_error or self._loading_stage,
                 "gallery_samples": len(self._embedding_names),
@@ -2546,8 +2566,28 @@ class FaceRecognizer:
 
         if not files:
             with self._lock:
-                self._loading_error = "known_faces/ tidak berisi foto."
-            return False
+                self._embedding_names = []
+                self._embedding_paths = []
+                self._embedding_matrix = None
+                self._identity_to_indices = {}
+                self._identity_names = []
+                self._identity_thresholds = {}
+                self._identity_topk_thresholds = {}
+                self._identity_margin_thresholds = {}
+                self._identity_calibration = {}
+                self._embedding_signature = self._cache_signature()
+                self._embeddings_ready = False
+                self._loading_error = None
+
+            self._set_stage(
+                "No registered faces - waiting for face registration..."
+            )
+            print(
+                "ℹ️ [ARCFACE] known_faces/ is empty. "
+                "Runtime models will still load; face registration is available.",
+                flush=True,
+            )
+            return True
 
         counts: dict[str, int] = {}
         for identity, _ in files:
@@ -3442,8 +3482,8 @@ class FaceRecognizer:
         if frame is None or detection is None:
             return "Unknown", 0.0, False
 
-        if not self.is_ready():
-            self._last_decision_reason = "recognizer_not_ready"
+        if not self.is_recognition_ready():
+            self._last_decision_reason = "recognition_gallery_not_ready"
             return "Unknown", 0.0, False
 
         target = self.format_person_name(target_identity)
@@ -3868,7 +3908,11 @@ class FaceRecognizer:
         with self._lock:
             self._loading = False
             if success:
-                self._loading_stage = "Face recognition ready"
+                self._loading_stage = (
+                    "Face recognition ready"
+                    if self._embeddings_ready
+                    else "Runtime ready - waiting for face registration"
+                )
                 self._loading_error = None
             self._ready_event.set()
 
@@ -3896,9 +3940,10 @@ class FaceRecognizer:
 
             self._index_dataset()
 
-            # Validate direct ArcFace during startup so the first live frame
-            # does not pay the DeepFace compatibility-check cost.
-            self._validate_direct_arcface_with_gallery()
+            # Gallery-dependent validation only runs after at least one valid
+            # registration exists. Empty known_faces/ is a supported startup state.
+            if self.is_embeddings_ready():
+                self._validate_direct_arcface_with_gallery()
 
             # Fasnet is a mandatory production gate when enabled. Do not mark
             # the recognizer ready until the PAD model is fully loaded.
@@ -4080,6 +4125,10 @@ def is_embeddings_ready() -> bool:
 
 def is_ready() -> bool:
     return get_face_recognizer().is_ready()
+
+
+def is_recognition_ready() -> bool:
+    return get_face_recognizer().is_recognition_ready()
 
 
 def get_runtime_status() -> dict:
@@ -4954,6 +5003,7 @@ __all__ = [
     "is_detector_ready",
     "is_embeddings_ready",
     "is_ready",
+    "is_recognition_ready",
     "get_runtime_status",
     "print_runtime_status",
     "is_loading",
