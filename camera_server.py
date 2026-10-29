@@ -89,7 +89,7 @@ HRIS_FACE_ATTENDANCE_EVIDENCE_URL = os.getenv(
 ).strip()
 FACE_RECOGNITION_TOKEN = os.getenv(
     "FACE_RECOGNITION_TOKEN",
-    "2ac9d2628f1710ec25299e7578fcef28fa823ca22cc5e2058dd797fbf61e3e89",
+    "",
 ).strip()
 HRIS_RETURN_URL = os.getenv(
     "HRIS_RETURN_URL",

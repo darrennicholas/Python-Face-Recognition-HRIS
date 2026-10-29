@@ -19,7 +19,9 @@ trackingSmoothing: 0.50,
 maxTrackingHoldMs: 120,
 // WebSocket
 websocketURL:
-    "ws://127.0.0.1:8765",
+    ["localhost", "127.0.0.1"].includes(window.location.hostname)
+        ? `ws://${window.location.hostname}:8765`
+        : `wss://${window.location.host}/ws`,
 reconnectDelay: 1500
 };
 // =========================================================

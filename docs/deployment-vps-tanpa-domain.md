@@ -1,5 +1,7 @@
 # Rencana deployment di VPS tanpa domain
 
+Langkah upload lewat GitHub dari Terminal WHM tersedia di [panduan AlmaLinux + WHM](upload-github-terminal-whm-almalinux.md). Untuk Ubuntu, lihat [panduan Nginx dan sertifikat IP](upload-dan-menjalankan-di-vps.md).
+
 Proyek ini dapat diakses melalui **IP publik VPS**; domain khusus untuk layanan Python tidak wajib. Contoh alamat halaman kamera: `https://203.0.113.10/camera` (`203.0.113.10` hanya contoh, ganti dengan IP VPS). Webcam tetap berada di perangkat karyawan dan frame dikirim dari browser ke Python melalui WebSocket.
 
 > Dokumen ini adalah daftar pekerjaan deployment, bukan tanda bahwa kode sekarang sudah siap untuk 100 pengguna bersamaan.
@@ -41,7 +43,7 @@ Konfigurasikan Nginx secara manual memakai sertifikat dan kunci di `/etc/letsenc
 - `wss://IP_VPS/ws` → `http://127.0.0.1:8765`; konfigurasi proxy harus meneruskan header `Upgrade` dan `Connection` untuk WebSocket. [Rujukan Nginx](https://nginx.org/en/docs/http/websocket.html).
 - Pertahankan jalur `/.well-known/acme-challenge/` pada port 80 untuk pembaruan sertifikat; arahkan permintaan HTTP lainnya ke HTTPS.
 
-Ubah `websocketURL` pada [camera_web.js](../camera_web/camera_web.js) yang saat ini menunjuk ke `ws://127.0.0.1:8765` menjadi alamat WSS pada IP VPS, misalnya `wss://${window.location.host}/ws`. Alamat `127.0.0.1` di JavaScript pengguna menunjuk ke **perangkat pengguna**, bukan VPS. Sesuaikan pula URL kembali ke HRIS yang masih memakai `.test` pada file itu. URL lokal yang dicetak [app.py](../app.py) hanya pesan di terminal; URL yang dibagikan kepada pengguna adalah alamat HTTPS Nginx.
+`websocketURL` pada [camera_web.js](../camera_web/camera_web.js) sekarang menggunakan alamat WSS pada IP VPS saat halaman dibuka dari server. Alamat `127.0.0.1` di JavaScript pengguna menunjuk ke **perangkat pengguna**, bukan VPS. Sesuaikan URL kembali ke HRIS yang masih memakai `.test` pada file itu. URL lokal yang dicetak [app.py](../app.py) hanya pesan di terminal; URL yang dibagikan kepada pengguna adalah alamat HTTPS reverse proxy.
 
 ## 5. Isi konfigurasi dan amankan integrasi
 
@@ -55,7 +57,7 @@ HRIS_RETURN_URL=https://ALAMAT_HRIS/
 FACE_RECOGNITION_TOKEN=TOKEN_RAHASIA_BARU
 ```
 
-Gunakan token yang sama pada sisi Laravel, batasi izin baca `.env`, dan rotasi token lama. [camera_server.py](../camera_server.py) saat ini masih memiliki nilai token bawaan dalam kode; hapus fallback tersebut sebelum layanan dibuka ke internet. Pastikan sertifikat HTTPS API Laravel valid dari VPS Python.
+Gunakan token yang sama pada sisi Laravel, batasi izin baca `.env`, dan rotasi token lama. [camera_server.py](../camera_server.py) kini tidak mempunyai nilai token bawaan. Pastikan sertifikat HTTPS API Laravel valid dari VPS Python.
 
 ## 6. Uji alur dari perangkat lain
 
