@@ -1884,7 +1884,7 @@ def _register_face_images(
 ) -> dict:
     """
     Save five images into:
-        known_faces/<FirstName>/<FirstName>_<EmployeeNo>_<N>.jpg
+        known_faces/<FullName>/<FirstName>_<EmployeeNo>_<N>.jpg
 
     Then refresh the FaceRecognizer gallery.
     """
@@ -1932,9 +1932,8 @@ def _register_face_images(
     recognizer = get_face_recognizer()
     known_faces_dir = recognizer.known_faces_dir
 
-    target_folder = (
-        known_faces_dir /
-        first_name
+    target_folder = known_faces_dir / _sanitize_registration_name(
+        format_display_name(employee_name)
     )
 
     target_folder.mkdir(
@@ -1943,11 +1942,10 @@ def _register_face_images(
     )
 
     with FACE_REGISTRATION_LOCK:
-        existing_files = sorted(
-            target_folder.glob(
-                f"{base_name}_*.jpg"
-            )
-        )
+        existing_files = sorted(target_folder.glob(f"{base_name}_*.jpg"))
+        legacy_folder = known_faces_dir / first_name
+        if legacy_folder != target_folder:
+            existing_files += sorted(legacy_folder.glob(f"{base_name}_*.jpg"))
 
         if existing_files:
             raise FaceRegistrationLockedError(
@@ -2013,7 +2011,7 @@ def _register_face_images(
             return {
                 "success": True,
                 "user_uid": user_uid,
-                "folder": first_name,
+                "folder": target_folder.name,
                 "path": str(target_folder),
                 "files": saved_files,
                 "start_index": start_index,
@@ -2068,16 +2066,13 @@ def _get_face_registration_status(
 
     recognizer = get_face_recognizer()
 
-    target_folder = (
-        recognizer.known_faces_dir /
-        first_name
+    target_folder = recognizer.known_faces_dir / _sanitize_registration_name(
+        format_display_name(employee_name)
     )
-
-    existing_files = sorted(
-        target_folder.glob(
-            f"{base_name}_*.jpg"
-        )
-    )
+    existing_files = sorted(target_folder.glob(f"{base_name}_*.jpg"))
+    legacy_folder = recognizer.known_faces_dir / first_name
+    if legacy_folder != target_folder:
+        existing_files += sorted(legacy_folder.glob(f"{base_name}_*.jpg"))
 
     registered = bool(existing_files)
 
@@ -2620,11 +2615,11 @@ async def ws_handler(websocket) -> None:
                             target_status = get_face_recognizer().get_target_identity_status(
                                 authenticated_user["name"]
                             )
-                            if target_status["available"]:
+                            if target_status["samples"] > 0:
                                 print(
                                     "🎯 [TARGET] HRIS target set to "
-                                    f"{target_status['target_identity']} | "
-                                    f"positive_samples={target_status['sample_count']} | "
+                                    f"{target_status['target']} | "
+                                    f"positive_samples={target_status['samples']} | "
                                     f"threshold={target_status['threshold']:.3f} | "
                                     "full gallery used for identity competition",
                                     flush=True,
