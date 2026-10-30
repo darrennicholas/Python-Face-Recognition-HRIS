@@ -106,10 +106,8 @@ const hrisAuthCode =
 new URLSearchParams(
 window.location.search
 ).get("code");
-// Fixed HRIS redirect destination.
-const HRIS_RETURN_URL = "https://hris-medialys.test/";
-// Laravel may return the same destination, but the fixed URL above is
-// always available as the fallback and is the required redirect target.
+// Fallback until Python sends HRIS_RETURN_URL after SSO.
+const HRIS_RETURN_URL = "https://demo-hris.kmfarma.com/";
 let hrisReturnUrl = HRIS_RETURN_URL;
 let attendanceRedirected = false;
 let hrisAuthenticated = false;
@@ -136,11 +134,11 @@ return (
 }
 function buildHrisCancelUrl() {
     try {
-        const url = new URL(HRIS_RETURN_URL);
+        const url = new URL(hrisReturnUrl);
         url.searchParams.set('faceauth_cancelled', '1');
         return url.toString();
     } catch (_) {
-        return HRIS_RETURN_URL;
+        return hrisReturnUrl;
     }
 }
 function stopCameraForSsoExpiry() {
@@ -570,7 +568,7 @@ socket.onmessage =
                 }
                 hrisAuthenticated = true;
                 hrisReturnUrl =
-                    HRIS_RETURN_URL;
+                    result.return_url || HRIS_RETURN_URL;
                 startSsoExpiryTimer(
                     result.sso_expires_in
                 );
@@ -848,7 +846,6 @@ if (attendanceRedirected) {
 }
 // Called only after:
 // result_saved=true + attendance_confirmed=true + hris_match=true.
-hrisReturnUrl = HRIS_RETURN_URL;
 attendanceRedirected = true;
 attendanceSaved = true;
 attendanceProcessing = false;

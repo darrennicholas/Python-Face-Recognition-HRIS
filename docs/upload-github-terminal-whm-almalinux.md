@@ -95,7 +95,7 @@ chown facehris:facehris .env
 chmod 600 .env
 ```
 
-`HRIS_RETURN_URL` dalam `.env` dipakai Python. Alamat yang masih tertulis `https://hris-medialys.test/` di `camera_web/camera_web.js` juga harus diganti ke alamat HRIS sebenarnya **sebelum commit/push**; JavaScript itu tidak membaca `.env`.
+`HRIS_RETURN_URL` dalam `.env` dipakai Python dan dikirim ke browser setelah SSO berhasil. JavaScript menggunakan URL tersebut untuk kembali ke HRIS; fallback di `camera_web/camera_web.js` adalah `https://demo-hris.kmfarma.com/`.
 
 Unggah folder foto `known_faces/` secara terpisah. Jika akun cPanel `kmfa1864` memiliki akses SSH, jalankan **di komputer lokal** dari folder project (ganti `IP_VPS`):
 

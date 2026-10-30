@@ -117,7 +117,7 @@ HRIS_RETURN_URL=https://demo-hris.kmfarma.com/
 FACE_RECOGNITION_TOKEN=ISI_TOKEN_ACAK_YANG_SAMA_DENGAN_LARAVEL
 ```
 
-`camera_web/camera_web.js` pada branch yang diuji masih memiliki `HRIS_RETURN_URL` dengan hostname `.test`. Perbarui ke URL HRIS nyata pada kode sumber, commit, dan deploy sebelum menguji alur browser penuh; JavaScript tidak membaca `.env` Python.
+`camera_web/camera_web.js` menerima `HRIS_RETURN_URL` dari Python setelah SSO berhasil. Pastikan `.env` Python berisi URL HRIS nyata dan restart service setelah mengubahnya. Fallback JavaScript menggunakan `https://demo-hris.kmfarma.com/`.
 
 Project Laravel yang diperiksa juga memiliki nilai mirip token di `.env.example` yang terlacak Git. Jangan pakai nilai contoh itu. Ganti dengan placeholder pada repo Laravel dan rotasi bila pernah digunakan sebagai token aktif.
 
