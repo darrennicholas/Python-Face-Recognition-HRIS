@@ -1,6 +1,6 @@
 # HR Attendance System
 
-Panduan VPS: [AlmaLinux 9 + Terminal WHM + GitHub](docs/upload-github-terminal-whm-almalinux.md) atau [Ubuntu tanpa domain](docs/upload-dan-menjalankan-di-vps.md). Baca juga [rencana deployment dan batas kapasitas](docs/deployment-vps-tanpa-domain.md).
+Panduan VPS: [implementasi WHM lewat IP port 8443](docs/deploy-whm-almalinux-ip-8443.md), [AlmaLinux 9 + Terminal WHM + GitHub](docs/upload-github-terminal-whm-almalinux.md), atau [Ubuntu tanpa domain](docs/upload-dan-menjalankan-di-vps.md). Baca juga [rencana deployment dan batas kapasitas](docs/deployment-vps-tanpa-domain.md).
 
 Sistem absensi karyawan berbasis **Face Recognition** menggunakan webcam browser, Python, OpenCV, YuNet, SFace, dan WebSocket.
 
